@@ -31,6 +31,9 @@ jobs:
           # Fail if go.mod or go.sum changed
           git diff --exit-code go.mod go.sum
 
+      - name: Verify cross-compilation
+        run: make build-cross
+
   test:
     name: Verify Unit Tests
     runs-on: ubuntu-latest
