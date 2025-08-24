@@ -13,7 +13,7 @@ require (
 	github.com/klauspost/compress v1.18.0
 	github.com/mtraver/base91 v1.0.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/mod v0.27.0
 	golang.org/x/sync v0.16.0
