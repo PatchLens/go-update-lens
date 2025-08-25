@@ -116,6 +116,11 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 					fmt.Errorf("module update failed: %w", err)
 			}
 		}
+		tidyCmd := NewProjectLoggedExec(modDir, env, "go", "mod", "tidy")
+		if err := tidyCmd.Run(); err != nil {
+			return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+				fmt.Errorf("module update tidy failed: %w", err)
+		}
 	}
 
 	// capture stable fields after module update
