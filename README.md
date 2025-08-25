@@ -23,11 +23,6 @@ A Go dependency update analysis tool that detects behavior changes when updating
 
 ## Installation
 
-### Prerequisites
-
-- Go 1.19 or higher
-- `go-mutesting` tool (for mutation testing)
-
 ### Setup
 
 1. Clone the repository:
@@ -48,7 +43,7 @@ make build
 
 This creates two executables in the `bin/` directory:
 - `modlens`: Main analysis tool
-- `report`: Report visualization generator
+- `report`: Report json -> png visualization generator
 
 ## Usage
 
@@ -124,6 +119,8 @@ PatchLens generates two types of output:
 
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See the [LICENSE](LICENSE) file for details.
 
+Please [contact us](https://patchlens.com/contact) for commercial licensing and access to premium features.
+
 ## Contributing
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for legal and license requirements for external contributors.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for legal and license requirements for external contributors.
