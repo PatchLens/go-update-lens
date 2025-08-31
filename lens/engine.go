@@ -371,7 +371,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 			// Build map of post-update frames by stack key for proper matching
 			postFramesByKey := bulk.SliceToGroupsBy(func(f CallFrame) string {
 				return stackFramesKey(&bb, projectFrames(f.Stack))
-			})
+			}, postResult)
 
 			// Track which frames with the same stack key have been used
 			usedFrames := make(map[string]int)
