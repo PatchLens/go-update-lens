@@ -27,7 +27,7 @@ func TestParseFlags(t *testing.T) {
 					assert.Equal(t, proj, c.ProjectDir)
 					assert.Equal(t, "github.com/foo/bar@v1", c.ModuleVersionFlag)
 					// AbsProjDir is set by Config.Prepare(), not ParseFlags
-					assert.Equal(t, "", c.AbsProjDir)
+					assert.Empty(t, c.AbsProjDir)
 				}
 				return args, nil, check, false
 			},
@@ -179,7 +179,7 @@ func TestParseFlags(t *testing.T) {
 			oldGopath := build.Default.GOPATH
 			build.Default.GOPATH = t.TempDir()
 			oldGomod := os.Getenv("GOMODCACHE")
-			os.Setenv("GOMODCACHE", t.TempDir())
+			require.NoError(t, os.Setenv("GOMODCACHE", t.TempDir()))
 			defer func() {
 				os.Args = oldArgs
 				build.Default.GOPATH = oldGopath

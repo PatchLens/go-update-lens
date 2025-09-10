@@ -14,7 +14,6 @@ const pprofDebug = false
 func main() {
 	log.SetFlags(log.LstdFlags)
 
-	// finish param setup
 	if pprofDebug {
 		go func() {
 			if err := http.ListenAndServe("localhost:6060", nil); err != nil {

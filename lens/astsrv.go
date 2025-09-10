@@ -119,7 +119,7 @@ func (s *astServer) handlePoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var msg LensMonitorMessagePoint
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		log.Printf("%sFailed to decode LensMonitorMessagePoint: %v", ErrorLogPrefix, err)
@@ -138,7 +138,7 @@ func (s *astServer) handlePointState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var msg LensMonitorMessagePointState
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		log.Printf("%sFailed to decode LensMonitorMessagePointState: %v", ErrorLogPrefix, err)
@@ -157,7 +157,7 @@ func (s *astServer) handlePointPanic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var msg LensMonitorMessagePointPanic
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		log.Printf("%sFailed to decode LensMonitorMessagePointPanic: %v", ErrorLogPrefix, err)
@@ -176,7 +176,7 @@ func (s *astServer) handleEventError(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var msg LensMonitorMessageError
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		log.Printf("%sFailed to decode LensMonitorMessageError: %v", ErrorLogPrefix, err)

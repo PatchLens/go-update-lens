@@ -58,9 +58,8 @@ func ParseFlags(customFlags []CustomFlag) (*lens.Config, error) {
 
 	// Validate standard flags
 	if (*moduleVersionFlag == "" && *modulesVersionFlag == "" && *updatedGoModFile == "" && *updatedGoWorkFile == "") || *projectDir == "" {
-		return nil, errors.New("Single Module Usage: -project ../foo -module <module>@<version>\ngo.mod Usage: -project ../foo -gomod ../foo-updated/go.mod\ngo.work Usage: -project ../foo -gowork ../foo-updated/go.work")
-	}
-	if *updatedGoModFile != "" && *updatedGoWorkFile != "" {
+		return nil, errors.New("single Module Usage: -project ../foo -module <module>@<version>\ngo.mod Usage: -project ../foo -gomod ../foo-updated/go.mod\ngo.work Usage: -project ../foo -gowork ../foo-updated/go.work")
+	} else if *updatedGoModFile != "" && *updatedGoWorkFile != "" {
 		return nil, errors.New("-gomod and -gowork are mutually exclusive")
 	}
 

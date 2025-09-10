@@ -140,7 +140,7 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 	if err != nil {
 		return MutationResult{}, fmt.Errorf("error building mutation script: %w", err)
 	}
-	defer os.Remove(execScript)
+	defer func() { _ = os.Remove(execScript) }()
 
 	args := []string{"--exec", execScript, "--match", "(" + strings.Join(mutationFunctions, "|") + ")"}
 	args = append(args, mutationFiles...)
@@ -179,7 +179,7 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 	total, _ := strconv.Atoi(m[5])
 
 	// remove unnecessary report.json report (for now)
-	go os.Remove(filepath.Join(projectDir, "report.json"))
+	go func() { _ = os.Remove(filepath.Join(projectDir, "report.json")) }()
 
 	return MutationResult{
 		MutationCount: total,
@@ -313,7 +313,7 @@ export GOMUTESTING_RESULT=$?
 	file, err := os.CreateTemp("", "mutationexec-*.sh")
 	if err != nil {
 		return "", err
-	} else if _, err = file.WriteString(fmt.Sprintf(scriptTmpl, strings.Join(packages, " "))); err != nil {
+	} else if _, err = fmt.Fprintf(file, scriptTmpl, strings.Join(packages, " ")); err != nil {
 		_ = file.Close()
 		return "", err
 	} else if err = file.Close(); err != nil {

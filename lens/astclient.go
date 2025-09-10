@@ -294,7 +294,7 @@ func postLensMonitorMessage(endpoint string, id int, payload interface{}) {
 		SendLensError(id, fmt.Errorf("POST %T failed: %w", payload, err))
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	if r.StatusCode >= 300 {
 		SendLensError(id, fmt.Errorf("%s returned status %d", endpoint, r.StatusCode))
 	}
@@ -318,7 +318,7 @@ func SendLensError(id int, origErr error) {
 	if err != nil {
 		fmt.Printf("POST LensMonitorMessageError failed: %v, original error: %v\n", err, origErr)
 	} else {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 300 {
 			fmt.Printf("error endpoint returned status %d, original error: %v\n", resp.StatusCode, origErr)
 		}

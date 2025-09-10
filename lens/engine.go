@@ -1070,7 +1070,9 @@ func (c *Config) validateFilePath(path, expectedType string) error {
 	if err != nil {
 		return fmt.Errorf("file is not readable: %w", err)
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
 
 	return nil
 }

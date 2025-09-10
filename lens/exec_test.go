@@ -17,7 +17,7 @@ func TestMergeSafeEnv(t *testing.T) {
 		for _, kv := range snapshot {
 			parts := strings.SplitN(kv, "=", 2)
 			if len(parts) == 2 {
-				os.Setenv(parts[0], parts[1])
+				require.NoError(t, os.Setenv(parts[0], parts[1]))
 			}
 		}
 	})

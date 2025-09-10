@@ -695,7 +695,8 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 					}
 					cell.FontStyle = defaultCellFontStyle // reset on each call to prevent prior changes persisting
 
-					if cell.Column == 1 { // Regression field
+					switch cell.Column {
+					case 1: // Regression field
 						if cell.Text == testFailStr {
 							cell.FontStyle.FontColor = redTextColor
 						} else if strings.Contains(cell.Text, testFailStr) {
@@ -703,7 +704,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 						} else {
 							cell.FontStyle.FontColor = greenTextColor
 						}
-					} else if cell.Column == 2 { // field change count
+					case 2: // field change count
 						if cell.Text != "0" {
 							if len(cell.Text) < 2 { // less than 10
 								cell.FontStyle.FontColor = orangeTextColor
@@ -713,7 +714,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 						} else {
 							cell.FontStyle.FontColor = greenTextColor
 						}
-					} else if cell.Column == 3 { // field changes
+					case 3: // field changes
 						cell.FontStyle.FontSize = 8
 					}
 					return cell

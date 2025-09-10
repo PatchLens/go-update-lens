@@ -20,7 +20,7 @@ func ZstdCompress(dst, data []byte) []byte {
 	if err != nil {
 		panic(err) // theoretically not possible
 	}
-	defer encoder.Close()
+	defer func() { _ = encoder.Close() }()
 
 	return encoder.EncodeAll(data, dst)
 }

@@ -595,7 +595,7 @@ func TestAnalyzeModuleChanges(t *testing.T) {
 	require.Len(t, checked, 1)
 	assert.Equal(t, modName, checked[0])
 	require.Len(t, funcs, 1)
-	assert.Equal(t, "Foo", funcs[0].Function.FunctionName)
+	assert.Equal(t, "Foo", funcs[0].FunctionName)
 	assert.Contains(t, funcs[0].Definition, "return 1")
 }
 
