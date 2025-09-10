@@ -268,9 +268,7 @@ func (d *DefaultTestProvider) ProvideTests(config Config, callingFunctions []*Ca
 	return TestStaticAnalysis(callingFunctions, config.AbsProjDir)
 }
 
-func (d *DefaultTestProvider) Cleanup() {
-	// No resources to clean up for static-only test provider
-}
+func (d *DefaultTestProvider) Cleanup() {}
 
 // DefaultUpdateAnalysisProvider provides the standard implementation of UpdateAnalysisProvider.
 type DefaultUpdateAnalysisProvider struct{}

@@ -13,7 +13,6 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// GeneratedTestFunctionPrefix is the prefix used for generated test functions
 const GeneratedTestFunctionPrefix = "TestGen_"
 const GeneratedTestFileSuffix = "_modlensgen_test.go"
 
@@ -74,7 +73,7 @@ type ModuleFunction struct {
 	LineChangeBitmap []bool
 }
 
-// ReachableModuleChange maps function identifiers to changed functions
+// ReachableModuleChange maps function identifiers to changed functions.
 type ReachableModuleChange map[string]*ModuleFunction
 
 // CallerFunction ties a caller in the project to a changed function.
@@ -585,7 +584,7 @@ func (fv FieldValues) ID() string {
 	return string(hash.Sum(nil))
 }
 
-// MutationResult summarizes mutation testing results
+// MutationResult summarizes mutation testing results.
 type MutationResult struct {
 	// MutationCount is the total mutations executed.
 	MutationCount int

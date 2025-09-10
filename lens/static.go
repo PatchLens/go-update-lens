@@ -121,8 +121,9 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 	return result, reachableModuleChanges, nil
 }
 
+// IsGeneratedFile returns true if the filename follows known patterns for generated go files.
 func IsGeneratedFile(filename string) bool {
-	suffixes := []string{".pb.go", ".pb.gw.go", "_grpc.pb.go", "_mock.go", "_gen.go", GeneratedTestFileSuffix}
+	suffixes := []string{".pb.go", ".pb.gw.go", "_grpc.pb.go", "_mock.go", "_gen.go", ".gen.go", GeneratedTestFileSuffix}
 	for _, s := range suffixes {
 		if strings.HasSuffix(filename, s) {
 			return true
@@ -333,7 +334,7 @@ func makeSSAFunctionIdent(fn *ssa.Function) (string, bool) {
 	return makeFunctionIdentStr(pkgName, "", fn.Name()), false // unexpected type fallback
 }
 
-// MakeFunctionIdent creates normalized key with package and receiver type.
+// MakeFunctionIdent creates a normalized key with package and receiver type.
 func MakeFunctionIdent(pkgName string, funcDecl *ast.FuncDecl) string {
 	var recv string
 	if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
