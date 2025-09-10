@@ -85,14 +85,12 @@ func (lb *limitedRollingBuffer) Write(p []byte) (n int, err error) {
 
 type lockedBuffer struct {
 	mu  sync.Mutex
-	buf *bytes.Buffer
+	buf bytes.Buffer
 }
 
-// NewLockedBuffer returns a mutex-protected buffer.
-func NewLockedBuffer() *lockedBuffer {
-	return &lockedBuffer{
-		buf: &bytes.Buffer{},
-	}
+// newLockedBuffer returns a mutex-protected buffer.
+func newLockedBuffer() *lockedBuffer {
+	return &lockedBuffer{}
 }
 
 func (lb *lockedBuffer) Write(p []byte) (int, error) {
@@ -113,10 +111,7 @@ func (lb *lockedBuffer) Bytes() []byte {
 }
 
 func (lb *lockedBuffer) String() string {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	return lb.buf.String()
+	return string(lb.Bytes())
 }
 
 func (lb *lockedBuffer) Len() int {

@@ -244,7 +244,7 @@ func TestLimitedRollingBufferWriter(t *testing.T) {
 func TestLockedBufferConcurrentWrite(t *testing.T) {
 	t.Parallel()
 
-	lb := NewLockedBuffer()
+	lb := newLockedBuffer()
 	var wg sync.WaitGroup
 	const workers = 10
 	const loops = 100
@@ -264,7 +264,7 @@ func TestLockedBufferConcurrentWrite(t *testing.T) {
 func TestLockedBufferBytesCopy(t *testing.T) {
 	t.Parallel()
 
-	lb := NewLockedBuffer()
+	lb := newLockedBuffer()
 	_, err := lb.Write([]byte("foo"))
 	require.NoError(t, err)
 	b := lb.Bytes()

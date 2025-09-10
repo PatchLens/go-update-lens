@@ -134,41 +134,6 @@ func CopyDir(ctx context.Context, src, dst string, progressNotify func(string, o
 	return eg.Wait()
 }
 
-// ContainsSymlinkOutsideDir checks if the directory contains a symlink which points outside the directory. Relative
-// symlinks are ignored, but absolute, or upwards traversal symlinks will return a true result.
-func ContainsSymlinkOutsideDir(dirPath string) error {
-	base, err := filepath.Abs(dirPath)
-	if err != nil {
-		return err
-	}
-
-	return filepath.WalkDir(base, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		if d.Type()&os.ModeSymlink != 0 {
-			resolved, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return err
-			}
-			absResolved, err := filepath.Abs(resolved)
-			if err != nil {
-				return err
-			}
-			rel, err := filepath.Rel(base, absResolved)
-			if err != nil {
-				return err
-			}
-			// If it begins with ".." then it points outside
-			if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return errors.New("disallowed symlink: " + path + "->" + resolved)
-			}
-		}
-		return nil
-	})
-}
-
 // WriteChmod adds write permissions for owner/group/others on every file and directory under root.
 func WriteChmod(ctx context.Context, root string) error {
 	return concurrentWalk(ctx, root, true, func(path string, info os.FileInfo) error {

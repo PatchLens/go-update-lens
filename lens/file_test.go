@@ -160,41 +160,6 @@ func TestCopyDir(t *testing.T) {
 	}
 }
 
-func TestContainsSymlinkOutsideDir(t *testing.T) {
-	t.Parallel()
-
-	t.Run("symlink_outside", func(t *testing.T) {
-		dir := t.TempDir()
-
-		insideFile := filepath.Join(dir, "file.txt")
-		require.NoError(t, os.WriteFile(insideFile, []byte("data"), 0o644))
-
-		outside, err := os.CreateTemp("", "outside-*.txt")
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = os.Remove(outside.Name()) })
-		require.NoError(t, outside.Close())
-
-		link := filepath.Join(dir, "outside_link")
-		require.NoError(t, os.Symlink(outside.Name(), link))
-
-		err = ContainsSymlinkOutsideDir(dir)
-		require.Error(t, err)
-	})
-
-	t.Run("symlink_inside", func(t *testing.T) {
-		dir := t.TempDir()
-
-		insideFile := filepath.Join(dir, "file.txt")
-		require.NoError(t, os.WriteFile(insideFile, []byte("data"), 0o644))
-
-		link := filepath.Join(dir, "inside_link")
-		require.NoError(t, os.Symlink(insideFile, link))
-
-		err := ContainsSymlinkOutsideDir(dir)
-		require.NoError(t, err)
-	})
-}
-
 func TestReplaceFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -75,7 +75,7 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 		// Disable mutation on unchanged lines by inserting the go-mutesting directive
 		astEditor := &astModifier{}
 		defer func() {
-			errs := astEditor.Restore(GoEnv(gopath, gomodcache))
+			errs := astEditor.Restore(goEnv(gopath, gomodcache))
 			if len(errs) > 0 {
 				log.Printf("%sFailed to cleanup AST change (%d): %v", ErrorLogPrefix, len(errs), errs[0])
 			}
@@ -152,9 +152,9 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 	var outBytes []byte
 	if debugMutationTesting {
 		args = append([]string{"--verbose"}, args...)
-		outBytes, err = NewProjectCapturedOutputExec(projectDir, GoEnv(gopath, gomodcache), "go-mutesting", args...)
+		outBytes, err = NewProjectCapturedOutputExec(projectDir, goEnv(gopath, gomodcache), "go-mutesting", args...)
 	} else {
-		cmd := NewProjectExec(projectDir, GoEnv(gopath, gomodcache), "go-mutesting", args...)
+		cmd := NewProjectExec(projectDir, goEnv(gopath, gomodcache), "go-mutesting", args...)
 		outBytes, err = cmd.CombinedOutput()
 	}
 	if err != nil {

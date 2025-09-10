@@ -101,10 +101,10 @@ func TestMergeSafeEnv(t *testing.T) {
 func TestGoEnv(t *testing.T) {
 	t.Parallel()
 
-	assert.Empty(t, GoEnv("", ""))
-	assert.Equal(t, []string{"GOPATH=/gp", "GOMODCACHE=/mod"}, GoEnv("/gp", "/mod"))
-	assert.Equal(t, []string{"GOPATH=/gp"}, GoEnv("/gp", ""))
-	assert.Equal(t, []string{"GOMODCACHE=/mod"}, GoEnv("", "/mod"))
+	assert.Empty(t, goEnv("", ""))
+	assert.Equal(t, []string{"GOPATH=/gp", "GOMODCACHE=/mod"}, goEnv("/gp", "/mod"))
+	assert.Equal(t, []string{"GOPATH=/gp"}, goEnv("/gp", ""))
+	assert.Equal(t, []string{"GOMODCACHE=/mod"}, goEnv("", "/mod"))
 }
 
 func TestNewProjectExec(t *testing.T) {

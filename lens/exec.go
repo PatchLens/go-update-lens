@@ -10,8 +10,8 @@ import (
 	"github.com/go-analyze/bulk"
 )
 
-// GoEnv returns environment entries for GOPATH and GOMODCACHE.
-func GoEnv(gopath, gomodcache string) []string {
+// goEnv returns environment entries for GOPATH and GOMODCACHE.
+func goEnv(gopath, gomodcache string) []string {
 	env := make([]string, 0, 2)
 	if gopath != "" {
 		env = append(env, "GOPATH="+gopath)
@@ -59,7 +59,7 @@ func NewProjectLoggedExec(projectDir string, env []string, name string, arg ...s
 // NewProjectCapturedOutputExec runs a command in projectDir with env, streams output, and returns combined stdout and stderr.
 func NewProjectCapturedOutputExec(projectDir string, env []string, name string, arg ...string) ([]byte, error) {
 	cmd := NewProjectExec(projectDir, env, name, arg...)
-	lb := NewLockedBuffer()
+	lb := newLockedBuffer()
 	cmd.Stdout = &teeWriter{
 		one: os.Stdout,
 		two: lb,
