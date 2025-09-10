@@ -271,7 +271,7 @@ func RecIface(n int) interface{} {
 				retCases = append(retCases, retCase{
 					fnName:   fn.Name.Name,
 					ret:      r,
-					decls:    visibleDeclsSyntactic(fn, r.Pos()),
+					decls:    visibleDeclsBefore(fn, r.Pos()),
 					resTypes: c.resultTypes,
 					resNames: c.resultNames,
 				})

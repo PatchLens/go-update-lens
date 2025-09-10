@@ -44,9 +44,9 @@ func TestStackFrame(t *testing.T) {
 		id2 := sf2.ID()
 		id3 := sf3.ID()
 
-		// identical content → identical ID
+		// identical content -> identical ID
 		assert.Equal(t, id1, id2)
-		// differing file → different ID
+		// differing file -> different ID
 		assert.NotEqual(t, id1, id3)
 	})
 

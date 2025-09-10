@@ -17,7 +17,7 @@ const debugMutationTesting = false
 
 var disabledMutations = []string{
 	// LOW VALUE BEHAVIOR MUTATIONS
-	// arithmetic/assignment - Replaces compound assignments with simple assignment (+= → =).
+	// arithmetic/assignment - Replaces compound assignments with simple assignment (+= -> =).
 	// These mutations often yield semantically equivalent code paths.
 	"arithmetic/assignment",
 	// numbers/decrementer - Subtracts one to each numeric literal. A very high mutation rate which significantly slows testing.
@@ -28,7 +28,7 @@ var disabledMutations = []string{
 	// LOOPING LOGIC - may increase execution time
 	// loop/break - Removes loop break conditions.
 	"loop/break",
-	// loop/condition - Alters loop conditions to constants (i<n → 1<1).
+	// loop/condition - Alters loop conditions to constants (i<n -> 1<1).
 	"loop/condition",
 	// loop/range_break - Targets `for … range` loops, removing or inverting early exits.
 	"loop/range_break",
@@ -227,7 +227,7 @@ func buildExecSelectTestsScript(fileToTests map[string][]string, packages []stri
 		return "", err
 	}
 
-	// Declare the associative array. Map from absolute file‐path → space‐separated list of test names
+	// Declare the associative array. Map from absolute file‐path -> space‐separated list of test names
 	if _, err := file.WriteString("declare -A FILE_TEST_MAP\n"); err != nil {
 		return "", err
 	}

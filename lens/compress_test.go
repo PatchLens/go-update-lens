@@ -40,7 +40,7 @@ func TestZstdDecompressError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestSnappyCompress exercises SnappyCompress → SnappyDecompress round-trip.
+// TestSnappyCompress exercises SnappyCompress -> SnappyDecompress round-trip.
 func TestSnappyCompress(t *testing.T) {
 	t.Parallel()
 

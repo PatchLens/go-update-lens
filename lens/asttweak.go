@@ -487,7 +487,7 @@ func (m *astModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 				}
 				pointIDs = append(pointIDs, pointID)
 
-				decls := visibleDeclsBefore(funcDecl, s.Pos(), info)
+				decls := visibleDeclsBefore(funcDecl, s.Pos())
 				newNode, err := buildReturnInstrumentation(&buf, s, pointID, fn, decls, funcResultTypes, info, funcResultNames)
 				if err != nil {
 					return err
@@ -555,7 +555,7 @@ func (m *astModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 		}
 		pointIDs = []int{pointID}
 
-		decls := visibleDeclsBefore(funcDecl, funcDecl.Body.End()-1, info)
+		decls := visibleDeclsBefore(funcDecl, funcDecl.Body.End()-1)
 		stmt, err := buildImplicitReturnInstrumentation(&buf, pointIDs[0], decls)
 		if err != nil {
 			return nil, fmt.Errorf("ast rewrite failure %s: %w", fn.FilePath, err)
@@ -622,14 +622,10 @@ func buildTypesInfo(fset *token.FileSet, targetFile *ast.File) *types.Info {
 }
 
 // visibleDeclsBefore collects visible identifiers before retPos using a syntactic scan.
-func visibleDeclsBefore(fn *ast.FuncDecl, retPos token.Pos, info *types.Info) []declInfo {
-	result := visibleDeclsSyntactic(fn, retPos)
-	sort.Slice(result, func(i, j int) bool { return result[i].pos < result[j].pos })
-	return result
-}
-
-// visibleDeclsSyntactic collects visible fields using an AST-only pass (fast, best-effort).
-func visibleDeclsSyntactic(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
+func visibleDeclsBefore(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
+	if fn == nil {
+		return nil
+	}
 	latest := make(map[string]declInfo)
 	addIdent := func(id *ast.Ident) {
 		if id == nil || id.Name == "_" || id.Pos() > retPos {
@@ -696,7 +692,9 @@ func visibleDeclsSyntactic(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
 		return true
 	})
 
-	return slices.Collect(maps.Values(latest))
+	result := slices.Collect(maps.Values(latest))
+	sort.Slice(result, func(i, j int) bool { return result[i].pos < result[j].pos })
+	return result
 }
 
 // buildReturnInstrumentation inserts instrumentation around an explicit return. All nodes that originate

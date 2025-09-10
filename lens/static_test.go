@@ -129,7 +129,7 @@ func TestReverseDFS(t *testing.T) {
 			graphFn: func() *callgraph.Node {
 				a := &callgraph.Node{}
 				b := &callgraph.Node{}
-				// a → b → a
+				// a -> b -> a
 				a.In = append(a.In, &callgraph.Edge{Caller: b})
 				b.In = append(b.In, &callgraph.Edge{Caller: a})
 				return a

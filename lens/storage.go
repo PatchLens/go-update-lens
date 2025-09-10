@@ -312,7 +312,7 @@ func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 	}
 
 	var stored []byte
-	var decompressedBuffer []byte
+	var decompressedSize int
 	if m := splitRe.FindSubmatch(raw); m == nil {
 		stored = raw // it was stored whole
 	} else { // reassemble split value
@@ -324,12 +324,11 @@ func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to parse compressed size: %w", err)
 		}
-		decompressedSize, err := strconv.Atoi(string(m[3]))
+		decompressedSize, err = strconv.Atoi(string(m[3]))
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to parse decompressed size: %w", err)
 		}
 		stored = make([]byte, compressedSize)
-		decompressedBuffer = make([]byte, decompressedSize) // prepare buffer since we know the exact size
 		var off int
 		if err := b.db.View(func(txn *badger.Txn) error {
 			for i := 0; i < count; i++ {
@@ -351,6 +350,7 @@ func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 	}
 
 	if badgerCompression == options.None { // manually decompress
+		decompressedBuffer := make([]byte, decompressedSize) // prepare buffer since we know the exact size
 		decompressed, err := ZstdDecompress(decompressedBuffer, stored)
 		return decompressed, true, err
 	} else {

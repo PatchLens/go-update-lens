@@ -351,7 +351,7 @@ func Foo() {
 	}
 }
 
-func TestVisibleDeclsSyntactic(t *testing.T) {
+func TestVisibleDeclsBefore(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -447,7 +447,7 @@ func Foo(a int) int {
 			require.NotNil(t, fn)
 			require.NotNil(t, ret)
 
-			decls := visibleDeclsSyntactic(fn, ret.Pos())
+			decls := visibleDeclsBefore(fn, ret.Pos())
 			names := make([]string, len(decls))
 			for i, d := range decls {
 				names[i] = d.ident.Name
@@ -482,7 +482,7 @@ func Bar() (x int) {
 	})
 	require.NotNil(t, ret)
 
-	decls := visibleDeclsSyntactic(fn, ret.Pos())
+	decls := visibleDeclsBefore(fn, ret.Pos())
 	blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Bar"}, decls,
 		[]ast.Expr{ast.NewIdent("int")}, nil, []string{"x"})
 	require.NoError(t, err)
@@ -525,7 +525,7 @@ func Foo() int {
 	})
 	require.NotNil(t, ret)
 
-	decls := visibleDeclsSyntactic(fn, ret.Pos())
+	decls := visibleDeclsBefore(fn, ret.Pos())
 	blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Foo"}, decls,
 		[]ast.Expr{ast.NewIdent("int")}, nil, []string{""})
 	require.NoError(t, err)
@@ -565,7 +565,7 @@ func Foo() interface{} {
 	})
 	require.NotNil(t, ret)
 
-	decls := visibleDeclsSyntactic(fn, ret.Pos())
+	decls := visibleDeclsBefore(fn, ret.Pos())
 	iface, _ := parser.ParseExpr("interface{}")
 	blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Foo"}, decls,
 		[]ast.Expr{iface}, nil, []string{""})
@@ -610,7 +610,7 @@ func Foo(x int) interface{} {
 	})
 	require.NotNil(t, ret)
 
-	decls := visibleDeclsSyntactic(fn, ret.Pos())
+	decls := visibleDeclsBefore(fn, ret.Pos())
 	iface, _ := parser.ParseExpr("interface{}")
 	blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Foo"}, decls,
 		[]ast.Expr{iface}, nil, []string{""})
@@ -650,7 +650,7 @@ func Baz() (x, y int) {
 	})
 	require.NotNil(t, ret)
 
-	decls := visibleDeclsSyntactic(fn, ret.Pos())
+	decls := visibleDeclsBefore(fn, ret.Pos())
 	blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Baz"}, decls,
 		[]ast.Expr{ast.NewIdent("int"), ast.NewIdent("int")}, nil, []string{"x", "y"})
 	require.NoError(t, err)
@@ -697,7 +697,7 @@ func Qux() (int, y int) {
 	})
 	require.NotNil(t, ret)
 
-	decls := visibleDeclsSyntactic(fn, ret.Pos())
+	decls := visibleDeclsBefore(fn, ret.Pos())
 	blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Qux"}, decls,
 		[]ast.Expr{ast.NewIdent("int"), ast.NewIdent("int")}, nil, []string{"", "y"})
 	require.NoError(t, err)
@@ -767,7 +767,7 @@ func Foo(n int) interface{} {
 			require.Len(t, rets, 2)
 
 			for i, ret := range rets {
-				decls := visibleDeclsSyntactic(fn, ret.Pos())
+				decls := visibleDeclsBefore(fn, ret.Pos())
 				blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Foo"}, decls,
 					[]ast.Expr{tc.resultType}, nil, []string{""})
 				require.NoError(t, err)

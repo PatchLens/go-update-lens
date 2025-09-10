@@ -162,7 +162,7 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 	}
 	oldLoadResult := <-resultCh
 	if oldLoadResult.err != nil {
-		return nil, nil, fmt.Errorf("failure loading module %s@%s: %w", modName, oldVer, err)
+		return nil, nil, fmt.Errorf("failure loading module %s@%s: %w", modName, oldVer, oldLoadResult.err)
 	}
 	oldDir, oldPkgs := oldLoadResult.dir, oldLoadResult.pkgs
 
@@ -298,10 +298,9 @@ func parseGoWork(workPath string) ([]string, error) {
 	}
 	workDir := filepath.Dir(workPath)
 
-	seen := map[string]struct{}{}
+	seen := make(map[string]struct{})
 	add := func(p string) {
-		p = filepath.Clean(p)
-		seen[p] = struct{}{}
+		seen[filepath.Clean(p)] = struct{}{}
 	}
 
 	// helper to walk a tree for "..."
@@ -349,7 +348,6 @@ func parseGoWork(workPath string) ([]string, error) {
 			if err := walkEllipsis(strings.TrimSuffix(raw, "...")); err != nil {
 				return nil, err
 			}
-
 		case strings.ContainsAny(raw, "*?[]"):
 			matches, err := filepath.Glob(filepath.Join(workDir, raw))
 			if err != nil {
@@ -361,7 +359,6 @@ func parseGoWork(workPath string) ([]string, error) {
 					add(rel)
 				}
 			}
-
 		default:
 			rel, _ := filepath.Rel(workDir, filepath.Join(workDir, raw))
 			add(rel)
@@ -373,6 +370,14 @@ func parseGoWork(workPath string) ([]string, error) {
 	return out, nil
 }
 
+// resolveGoModPath returns the absolute path to a go.mod file given a project directory and a module directory.
+func resolveGoModPath(projectDir, dir string) string {
+	if filepath.IsAbs(dir) {
+		return filepath.Join(dir, "go.mod")
+	}
+	return filepath.Join(projectDir, dir, "go.mod")
+}
+
 // parseProjectDeps reads dependencies from either a single go.mod or a go.work workspace.
 func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, error) {
 	rootMod := filepath.Join(projectDir, "go.mod")
@@ -381,8 +386,7 @@ func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, 
 	// versionsMap collects every version seen for each module path
 	versionsMap := make(map[string][]string)
 
-	// root module if present
-	if FileExists(rootMod) {
+	if FileExists(rootMod) { // root module if present
 		rootDeps, err := parseGoMod(rootMod)
 		if err != nil {
 			return nil, err
@@ -392,19 +396,13 @@ func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, 
 		}
 	}
 
-	// workspace modules
-	if FileExists(workFile) {
+	if FileExists(workFile) { // workspace modules
 		dirs, err := parseGoWork(workFile)
 		if err != nil {
 			return nil, err
 		}
 		for _, dir := range dirs {
-			var gm string
-			if filepath.IsAbs(dir) {
-				gm = filepath.Join(dir, "go.mod")
-			} else {
-				gm = filepath.Join(projectDir, dir, "go.mod")
-			}
+			gm := resolveGoModPath(projectDir, dir)
 			if _, err := os.Stat(gm); err != nil {
 				continue // skip missing or unreadable module rather than failing the whole parse
 			}
@@ -464,13 +462,7 @@ func ProjectGoModFiles(projectDir string) ([]string, error) {
 			return nil, err
 		}
 		for _, dir := range dirs {
-			var gm string
-			if filepath.IsAbs(dir) {
-				gm = filepath.Join(dir, "go.mod")
-			} else {
-				// dir comes from parseGoWork so it is relative to projectDir
-				gm = filepath.Join(projectDir, dir, "go.mod")
-			}
+			gm := resolveGoModPath(projectDir, dir)
 			if FileExists(gm) {
 				modSet[gm] = true
 			}
@@ -555,7 +547,7 @@ func DiffModulesFromGoWorkFiles(projectDir, newWorkPath string) ([]ModuleChange,
 		if _, errOld := os.Stat(oldGM); errOld != nil {
 			continue // directory is new only, not relevant to current project
 		} else if _, errNew := os.Stat(newGM); errNew != nil {
-			continue // directory was removed → ignore
+			continue // directory was removed -> ignore
 		}
 		changes, err := DiffModulesFromGoModFiles(oldGM, newGM)
 		if err != nil {
