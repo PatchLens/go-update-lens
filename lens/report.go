@@ -13,7 +13,6 @@ import (
 	"github.com/go-analyze/charts"
 )
 
-const bottomChartTable = true // TODO - remove when finalized on chart style
 const bottomTableMaxRecords = 10
 
 // chart color constants
@@ -401,7 +400,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 	resultBox := charts.NewBoxEqual(0)
 	resultBox.Right = p.Width()
 	p.FilledRect(0, 0, p.Width(), p.Height(), charts.ColorWhite, charts.ColorWhite, 0)
-	p = p.Child(charts.PainterPaddingOption(charts.NewBoxEqual(chartPadding)))
+	p = p.Child(charts.PainterPaddingOption(charts.NewBox(0, chartPadding, chartPadding, chartPadding)))
 
 	var title string
 	var titleBox charts.Box
@@ -415,18 +414,31 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 		title = moduleName + "@" + startVersion + "->" + changeVersion
 		titleBox = p.MeasureText(title, 0, titleFont)
 		// title rendered after the charts to ensure it does not get clipped
-		titleBottom = titleBox.Height() + chartPadding
-		resultBox.Bottom += titleBottom + chartPadding // second padding for the bottom side of the chart
+		titleBottom = titleBox.Height()
+		resultBox.Bottom += titleBottom
 	}
 
-	const middleUpShift = 40 // press into the chart above
-	// TODO - update charts API to make this type of painter layout easier, possibly reference the edges of the painters
-	topLeft := p.Child(charts.PainterBoxOption(charts.NewBox(0, titleBottom, p.Width()/2, 128+titleBottom)))
-	down1Left := p.Child(charts.PainterBoxOption(charts.NewBox(0, 128+titleBottom-middleUpShift, p.Width()/2, 240+titleBottom-middleUpShift)))
-	down2 := p.Child(charts.PainterBoxOption(charts.NewBox(0, 240+titleBottom-(middleUpShift*2), p.Width(), 360+titleBottom-(middleUpShift*2))))
-	topRight := p.Child(charts.PainterBoxOption(charts.NewBox(p.Width()/2, titleBottom, p.Width(), 128+titleBottom)))
-	down1Right := p.Child(charts.PainterBoxOption(charts.NewBox(p.Width()/2, 128+titleBottom-middleUpShift, p.Width(), 240+titleBottom-middleUpShift)))
-	bottom := p.Child(charts.PainterBoxOption(charts.NewBox(0, 360+titleBottom-(middleUpShift*2), p.Width(), p.Height())))
+	// Use layout builder API to create painters for each chart
+	const middleUpShift = "-40" // overlap amount between rows
+	layoutBuilder := p.LayoutByRows()
+	if titleBottom > 0 {
+		layoutBuilder = layoutBuilder.RowGap(strconv.Itoa(titleBottom))
+	}
+	painters, err := layoutBuilder.
+		Row().Height("128").Columns("topLeft", "topRight").
+		Row().Height("112").RowOffset(middleUpShift).Columns("down1Left", "down1Right").
+		Row().Height("120").RowOffset(middleUpShift).Columns("down2").
+		Row().Columns("bottom"). // single large painter at the bottom with all remaining space
+		Build()
+	if err != nil {
+		return resultBox, fmt.Errorf("error building chart layout: %w", err)
+	}
+	topLeft := painters["topLeft"]
+	topRight := painters["topRight"]
+	down1Left := painters["down1Left"]
+	down1Right := painters["down1Right"]
+	down2 := painters["down2"]
+	bottom := painters["bottom"]
 
 	barGaugeThemeGreenRed := charts.GetTheme(charts.ThemeLight).
 		WithBackgroundColor(charts.ColorTransparent).
@@ -573,203 +585,164 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 
 	resultBox.Bottom += max(down1Left.Height(), down1Right.Height()) + down2.Height()
 
-	if bottomChartTable {
-		var riskyTests [][]string
-		for _, tr := range testResults {
-			testRegression := !tr.OriginalResult.TestFailure && tr.PostUpdateResult.TestFailure
+	var riskyTests [][]string
+	for _, tr := range testResults {
+		testRegression := !tr.OriginalResult.TestFailure && tr.PostUpdateResult.TestFailure
 
-			if testRegression || tr.DiffFieldCount > 0 {
-				regressionStr := testPassStr
-				if testRegression {
-					regressionStr = testFailStr
-				} else if tr.OriginalResult.TestFailure {
-					regressionStr = "Baseline FAIL"
-				}
-
-				var lines int
-				var fieldChangeBuilder strings.Builder
-				for callerIdent, fieldMap := range tr.CallerFieldChanges {
-					if lines > 1 {
-						fieldChangeBuilder.WriteString("\n(")
-						fieldChangeBuilder.WriteString(strconv.Itoa(len(tr.CallerFieldChanges) - lines))
-						fieldChangeBuilder.WriteString(" more field differences)")
-						break
-					} else if lines > 0 {
-						fieldChangeBuilder.WriteRune('\n')
-					}
-					lines++
-
-					fieldChangeStr := callerIdent + "[" + strings.Join(slices.Collect(maps.Keys(fieldMap)), "|") + "]"
-					fieldChangeStr += fieldChangeStr
-					if len(fieldChangeStr) > 66 {
-						fieldChangeStr = fieldChangeStr[:64] + ".."
-					}
-					fieldChangeBuilder.WriteString(fieldChangeStr)
-				}
-
-				riskyTests = append(riskyTests, []string{
-					tr.OriginalResult.TestFunction.FunctionName,
-					regressionStr,
-					strconv.Itoa(tr.DiffFieldCount),
-					fieldChangeBuilder.String(),
-				})
+		if testRegression || tr.DiffFieldCount > 0 {
+			regressionStr := testPassStr
+			if testRegression {
+				regressionStr = testFailStr
+			} else if tr.OriginalResult.TestFailure {
+				regressionStr = "Baseline FAIL"
 			}
-		}
-		if len(riskyTests) == 0 {
-			text := "No Risky Tests Identified"
-			textBox := bottom.MeasureText(text, 0, titleFont)
-			bottom.Text(text, (bottom.Width()-textBox.Width())/2, bottom.Height()/2, 0, titleFont)
-			resultBox.Bottom += textBox.Height() * 2
-		} else {
-			slices.SortFunc(riskyTests, func(a, b []string) int {
-				aGen := strings.HasPrefix(a[0], GeneratedTestFunctionPrefix)
-				bGen := strings.HasPrefix(b[0], GeneratedTestFunctionPrefix)
-				if aGen != bGen { // sort generated functions last
-					if aGen {
-						return 1
-					} else {
-						return -1
-					}
-				}
-				var aRegress, bRegress int
-				if a[1] == testFailStr {
-					aRegress = 1
-				}
-				if b[1] == testFailStr {
-					bRegress = 1
-				}
-				if aRegress != bRegress {
-					return bRegress - aRegress
-				}
 
-				aCount, _ := strconv.Atoi(a[2])
-				bCount, _ := strconv.Atoi(b[2])
-				if aCount != bCount { // sort by field change count first, highest first
-					return bCount - aCount
+			var lines int
+			var fieldChangeBuilder strings.Builder
+			for callerIdent, fieldMap := range tr.CallerFieldChanges {
+				if lines > 1 {
+					fieldChangeBuilder.WriteString("\n(")
+					fieldChangeBuilder.WriteString(strconv.Itoa(len(tr.CallerFieldChanges) - lines))
+					fieldChangeBuilder.WriteString(" more field differences)")
+					break
+				} else if lines > 0 {
+					fieldChangeBuilder.WriteRune('\n')
 				}
+				lines++
 
-				aCount, _ = strconv.Atoi(a[3])
-				bCount, _ = strconv.Atoi(b[3])
-				if aCount != bCount { // highest mutations second
-					return bCount - aCount
+				fieldChangeStr := callerIdent + "[" + strings.Join(slices.Collect(maps.Keys(fieldMap)), "|") + "]"
+				fieldChangeStr += fieldChangeStr
+				if len(fieldChangeStr) > 66 {
+					fieldChangeStr = fieldChangeStr[:64] + ".."
 				}
+				fieldChangeBuilder.WriteString(fieldChangeStr)
+			}
 
-				return 0
+			riskyTests = append(riskyTests, []string{
+				tr.OriginalResult.TestFunction.FunctionName,
+				regressionStr,
+				strconv.Itoa(tr.DiffFieldCount),
+				fieldChangeBuilder.String(),
 			})
-			if len(riskyTests) > bottomTableMaxRecords {
-				riskyTests = riskyTests[:bottomTableMaxRecords]
+		}
+	}
+	if len(riskyTests) == 0 {
+		text := "No Risky Tests Identified"
+		textBox := bottom.MeasureText(text, 0, titleFont)
+		bottom.Text(text, (bottom.Width()-textBox.Width())/2, bottom.Height()/2, 0, titleFont)
+		resultBox.Bottom += textBox.Height() * 2
+	} else {
+		slices.SortFunc(riskyTests, func(a, b []string) int {
+			aGen := strings.HasPrefix(a[0], GeneratedTestFunctionPrefix)
+			bGen := strings.HasPrefix(b[0], GeneratedTestFunctionPrefix)
+			if aGen != bGen { // sort generated functions last
+				if aGen {
+					return 1
+				} else {
+					return -1
+				}
 			}
-			tableTitle := "Risky Tests"
-			tableTitleFont := charts.FontStyle{
-				FontSize:  12,
-				FontColor: barGaugeThemeGreenRed.GetTitleTextColor(),
-				Font:      charts.GetDefaultFont(),
+			var aRegress, bRegress int
+			if a[1] == testFailStr {
+				aRegress = 1
 			}
-			tableTitleBox := bottom.MeasureText(tableTitle, 0, tableTitleFont)
-			bottom.Text(tableTitle, 10, tableTitleBox.Height(), 0, tableTitleFont)
-			rowColors := []charts.Color{
-				{R: 240, G: 240, B: 240, A: 255},
-				charts.ColorTransparent,
+			if b[1] == testFailStr {
+				bRegress = 1
 			}
-			if len(riskyTests)%2 == 0 {
-				// reverse row colors so table end is opposite of transparent
-				rowColors[0], rowColors[1] = rowColors[1], rowColors[0]
+			if aRegress != bRegress {
+				return bRegress - aRegress
 			}
-			defaultCellFontStyle := charts.FontStyle{
-				FontSize:  12,
-				FontColor: charts.Color{R: 50, G: 50, B: 50, A: 255},
-				Font:      charts.GetDefaultFont(),
-			}
-			bottomOpt := charts.TableChartOption{
-				Header:                []string{"Test Name", "Regression", "Fields Changed", "Field Changes"},
-				Data:                  riskyTests,
-				HeaderBackgroundColor: charts.Color{R: 210, G: 210, B: 210, A: 255},
-				RowBackgroundColors:   rowColors,
-				Padding:               charts.NewBoxEqual(10),
-				Spans:                 []int{24, 8, 8, 28},
-				TextAligns:            []string{charts.AlignLeft, charts.AlignLeft, charts.AlignCenter, charts.AlignLeft},
-				CellModifier: func(cell charts.TableCell) charts.TableCell {
-					// TODO - FUTURE - simpler api for charts?
-					if cell.Row == 0 {
-						return cell
-					}
-					cell.FontStyle = defaultCellFontStyle // reset on each call to prevent prior changes persisting
 
-					switch cell.Column {
-					case 1: // Regression field
-						if cell.Text == testFailStr {
-							cell.FontStyle.FontColor = redTextColor
-						} else if strings.Contains(cell.Text, testFailStr) {
+			aCount, _ := strconv.Atoi(a[2])
+			bCount, _ := strconv.Atoi(b[2])
+			if aCount != bCount { // sort by field change count first, highest first
+				return bCount - aCount
+			}
+
+			aCount, _ = strconv.Atoi(a[3])
+			bCount, _ = strconv.Atoi(b[3])
+			if aCount != bCount { // highest mutations second
+				return bCount - aCount
+			}
+
+			return 0
+		})
+		if len(riskyTests) > bottomTableMaxRecords {
+			riskyTests = riskyTests[:bottomTableMaxRecords]
+		}
+		tableTitle := "Risky Tests"
+		tableTitleFont := charts.FontStyle{
+			FontSize:  12,
+			FontColor: barGaugeThemeGreenRed.GetTitleTextColor(),
+			Font:      charts.GetDefaultFont(),
+		}
+		tableTitleBox := bottom.MeasureText(tableTitle, 0, tableTitleFont)
+		bottom.Text(tableTitle, 10, tableTitleBox.Height(), 0, tableTitleFont)
+		rowColors := []charts.Color{
+			{R: 240, G: 240, B: 240, A: 255},
+			charts.ColorTransparent,
+		}
+		if len(riskyTests)%2 == 0 {
+			// reverse row colors so table end is opposite of transparent
+			rowColors[0], rowColors[1] = rowColors[1], rowColors[0]
+		}
+		defaultCellFontStyle := charts.FontStyle{
+			FontSize:  12,
+			FontColor: charts.Color{R: 50, G: 50, B: 50, A: 255},
+			Font:      charts.GetDefaultFont(),
+		}
+		bottomOpt := charts.TableChartOption{
+			Header:                []string{"Test Name", "Regression", "Fields Changed", "Field Changes"},
+			Data:                  riskyTests,
+			HeaderBackgroundColor: charts.Color{R: 210, G: 210, B: 210, A: 255},
+			RowBackgroundColors:   rowColors,
+			Padding:               charts.NewBoxEqual(10),
+			Spans:                 []int{24, 8, 8, 28},
+			TextAligns:            []string{charts.AlignLeft, charts.AlignLeft, charts.AlignCenter, charts.AlignLeft},
+			CellModifier: func(cell charts.TableCell) charts.TableCell {
+				// TODO - FUTURE - simpler api for charts?
+				if cell.Row == 0 {
+					return cell
+				}
+				cell.FontStyle = defaultCellFontStyle // reset on each call to prevent prior changes persisting
+
+				switch cell.Column {
+				case 1: // Regression field
+					if cell.Text == testFailStr {
+						cell.FontStyle.FontColor = redTextColor
+					} else if strings.Contains(cell.Text, testFailStr) {
+						cell.FontStyle.FontColor = orangeTextColor
+					} else {
+						cell.FontStyle.FontColor = greenTextColor
+					}
+				case 2: // field change count
+					if cell.Text != "0" {
+						if len(cell.Text) < 2 { // less than 10
 							cell.FontStyle.FontColor = orangeTextColor
 						} else {
-							cell.FontStyle.FontColor = greenTextColor
+							cell.FontStyle.FontColor = redTextColor
 						}
-					case 2: // field change count
-						if cell.Text != "0" {
-							if len(cell.Text) < 2 { // less than 10
-								cell.FontStyle.FontColor = orangeTextColor
-							} else {
-								cell.FontStyle.FontColor = redTextColor
-							}
-						} else {
-							cell.FontStyle.FontColor = greenTextColor
-						}
-					case 3: // field changes
-						cell.FontStyle.FontSize = 8
+					} else {
+						cell.FontStyle.FontColor = greenTextColor
 					}
-					return cell
-				},
-			}
-			tablePainter := bottom.Child(charts.PainterPaddingOption(charts.NewBox(10, tableTitleBox.Height()+8, 0, 0)))
-			if err := tablePainter.TableChart(bottomOpt); err != nil {
-				return resultBox, fmt.Errorf("error rendering table: %w", err)
-			}
-			// re-render just so we can calculate the height of the table, currently charts does not return the table sizes
-			// TODO - FUTURE - improve charts API to avoid this
-			bottomOpt.Width = bottom.Width()
-			if p, _ := charts.TableOptionRenderDirect(bottomOpt); p != nil {
-				resultBox.Bottom += tableTitleBox.Height() + p.Height()
-			} else {
-				resultBox.Bottom += bottom.Height()
-			}
+				case 3: // field changes
+					cell.FontStyle.FontSize = 8
+				}
+				return cell
+			},
 		}
-	} else {
-		testNames := make([]string, len(testResults))
-		fieldChanges := make([]float64, len(testResults))
-		moduleChangesHit := make([]float64, len(testResults))
-		for i, tr := range testResults {
-			testNames[i] = tr.OriginalResult.TestFunction.FunctionName
-			if len(testNames[i]) > 18 {
-				testNames[i] = testNames[i][:16] + ".."
-			}
-			fieldChanges[i] = float64(tr.DiffFieldCount)
-			moduleChangesHit[i] = float64(tr.OriginalResult.ModuleChangesHit)
+		tablePainter := bottom.Child(charts.PainterPaddingOption(charts.NewBox(10, tableTitleBox.Height()+8, 0, 0)))
+		if err := tablePainter.TableChart(bottomOpt); err != nil {
+			return resultBox, fmt.Errorf("error rendering table: %w", err)
 		}
-		bottomOpt := charts.NewBarChartOptionWithData([][]float64{fieldChanges})
-		bottomOpt.SeriesList[0].Name = "Field Changes"
-		bottomOpt.SeriesList = append(bottomOpt.SeriesList, charts.BarSeries{
-			Values:     moduleChangesHit,
-			Name:       "Module Changes Hit",
-			YAxisIndex: 1,
-		})
-		bottomOpt.Theme = charts.GetTheme(charts.ThemeSummer)
-		//bottomOpt.XAxis.BoundaryGap = charts.Ptr(false)
-		bottomOpt.XAxis.Labels = testNames
-		bottomOpt.XAxis.LabelRotation = charts.DegreesToRadians(90)
-		bottomOpt.XAxis.LabelFontStyle = charts.NewFontStyleWithSize(10)
-		bottomOpt.YAxis = append(bottomOpt.YAxis, bottomOpt.YAxis[0])
-		bottomOpt.YAxis[0].Title = bottomOpt.SeriesList[0].Name
-		bottomOpt.YAxis[0].TitleFontStyle.FontColor = bottomOpt.Theme.GetSeriesColor(0)
-		bottomOpt.YAxis[1].Title = bottomOpt.SeriesList[1].Name
-		bottomOpt.YAxis[1].TitleFontStyle.FontColor = bottomOpt.Theme.GetSeriesColor(1)
-		bottomOpt.Title.Text = "Risk By Test"
-		bottomOpt.Legend.Show = charts.Ptr(false)
-		bottomOpt.BarWidth = 12
-		bottomOpt.BarMargin = charts.Ptr(4.0)
-		if err := bottom.BarChart(bottomOpt); err != nil {
-			return resultBox, fmt.Errorf("error rendering chart: %w", err)
+		// re-render just so we can calculate the height of the table, currently charts does not return the table sizes
+		// TODO - FUTURE - improve charts API to avoid this
+		bottomOpt.Width = bottom.Width()
+		if p, _ := charts.TableOptionRenderDirect(bottomOpt); p != nil {
+			resultBox.Bottom += tableTitleBox.Height() + p.Height()
+		} else {
+			resultBox.Bottom += bottom.Height()
 		}
-		resultBox.Bottom += bottom.Height()
 	}
 
 	// render the final chart extras
