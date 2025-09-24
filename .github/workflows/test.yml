@@ -10,6 +10,8 @@ jobs:
   lint-and-tidy:
     name: Verify Linting
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -37,6 +39,8 @@ jobs:
   test:
     name: Verify Unit Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         go:
