@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"go/build"
 	"os"
 	"path/filepath"
@@ -54,7 +55,34 @@ func ParseFlags(customFlags []CustomFlag) (*lens.Config, error) {
 		}
 	}
 
+	// Check for help flags before parsing
+	helpFlag := flag.Bool("h", false, "")
+	helpLongFlag := flag.Bool("help", false, "Show usage and help")
+
 	flag.Parse()
+
+	if *helpFlag || *helpLongFlag {
+		out := flag.CommandLine.Output()
+		_, _ = fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+		_, _ = fmt.Fprintf(out, "\nRequired Flags:\n")
+		_, _ = fmt.Fprintf(out, "  -project string\n")
+		_, _ = fmt.Fprintf(out, "    \tPath to the project directory to analyze\n")
+		_, _ = fmt.Fprintf(out, "  Plus one of:\n")
+		_, _ = fmt.Fprintf(out, "    -module string\n")
+		_, _ = fmt.Fprintf(out, "      \tSingle module@version update to analyze (e.g., github.com/foo/bar@v1.2.3)\n")
+		_, _ = fmt.Fprintf(out, "    -modules string\n")
+		_, _ = fmt.Fprintf(out, "      \tComma-separated module@version updates to analyze\n")
+		_, _ = fmt.Fprintf(out, "    -gomod string\n")
+		_, _ = fmt.Fprintf(out, "      \tPath to an updated go.mod file to determine updates\n")
+		_, _ = fmt.Fprintf(out, "    -gowork string\n")
+		_, _ = fmt.Fprintf(out, "      \tPath to an updated go.work file to determine updates\n")
+		_, _ = fmt.Fprintf(out, "\nAll Flags:\n")
+		flag.PrintDefaults()
+		_, _ = fmt.Fprintf(out, "\nExample Usage patterns:\n")
+		_, _ = fmt.Fprintf(out, "  Modules:        %s -project <dir> -modules <module1>@<version>,<module2>@<version>\n", os.Args[0])
+		_, _ = fmt.Fprintf(out, "  go.mod update:  %s -project <dir> -gomod <path-updated-go.mod>\n", os.Args[0])
+		os.Exit(0)
+	}
 
 	// Validate standard flags
 	if (*moduleVersionFlag == "" && *modulesVersionFlag == "" && *updatedGoModFile == "" && *updatedGoWorkFile == "") || *projectDir == "" {
