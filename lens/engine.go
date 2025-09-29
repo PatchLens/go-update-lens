@@ -10,12 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-analyze/bulk"
-	"github.com/google/uuid"
 	"github.com/pmezard/go-difflib/difflib"
 )
 
@@ -611,7 +611,9 @@ func NewAnalysisEngine(config *Config) *AnalysisEngine {
 		MutationTester:         &DefaultMutationTester{},
 		TestResultAnalyzer:     &DefaultTestResultAnalyzer{},
 		StorageProvider: &DefaultStorageProvider{
-			Path:    filepath.Join(os.TempDir(), "lens_state-"+uuid.New().String()),
+			Path: filepath.Join(os.TempDir(),
+				fmt.Sprintf("lens_state-%d-%s",
+					os.Getpid(), strconv.FormatInt(time.Now().UnixNano(), 16))),
 			CacheMB: config.CacheMB,
 		},
 		ReportWriter: &DefaultReportWriter{},
