@@ -1,12 +1,12 @@
 package lens
 
 import (
-	"context"
 	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,7 +130,7 @@ func TestCopyDir(t *testing.T) {
 	}
 
 	dstDir := t.TempDir()
-	require.NoError(t, CopyDir(context.Background(), srcDir, dstDir, nil))
+	require.NoError(t, CopyDir(t.Context(), srcDir, dstDir, nil))
 
 	// Helper function to collect file contents
 	collectFiles := func(root string) (map[string]string, error) {
@@ -214,7 +214,7 @@ func TestWriteChmod(t *testing.T) {
 	require.NoError(t, os.Chmod(sub1, 0555))
 	require.NoError(t, os.Chmod(root, 0555))
 
-	require.NoError(t, WriteChmod(context.Background(), root))
+	require.NoError(t, WriteChmod(t.Context(), root))
 
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		require.NoError(t, err)
@@ -232,4 +232,48 @@ func TestWriteChmod(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestConcurrentWalk(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// Create test file structure
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "subdir1", "subdir2"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "subdir3"), 0755))
+
+	files := []string{
+		filepath.Join(dir, "file1.txt"),
+		filepath.Join(dir, "file2.txt"),
+		filepath.Join(dir, "subdir1", "file3.txt"),
+		filepath.Join(dir, "subdir1", "subdir2", "file4.txt"),
+		filepath.Join(dir, "subdir3", "file5.txt"),
+	}
+
+	for _, f := range files {
+		require.NoError(t, os.WriteFile(f, []byte("content"), 0644))
+	}
+
+	// Collect paths via concurrentWalk
+	var mu sync.Mutex
+	var collectedPaths []string
+
+	walkFn := func(path string, info os.FileInfo) error {
+		if !info.IsDir() {
+			mu.Lock()
+			collectedPaths = append(collectedPaths, path)
+			mu.Unlock()
+		}
+		return nil
+	}
+
+	err := concurrentWalk(t.Context(), dir, false, walkFn)
+	require.NoError(t, err)
+
+	// Verify all files were found
+	assert.Len(t, collectedPaths, len(files))
+	for _, expectedFile := range files {
+		assert.Contains(t, collectedPaths, expectedFile)
+	}
 }

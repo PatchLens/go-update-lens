@@ -2,7 +2,6 @@ package lens
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -80,7 +79,7 @@ func BenchmarkASTClientServer(b *testing.B) {
 	srv, err := astExecServerStart(lensMonitorServerHost, lensMonitorServerPort, nil)
 	require.NoError(b, err)
 	defer func() {
-		_ = srv.Stop(context.Background())
+		_ = srv.Stop(b.Context())
 	}()
 	b.ResetTimer()
 

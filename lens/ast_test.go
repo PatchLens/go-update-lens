@@ -1,7 +1,6 @@
 package lens
 
 import (
-	"context"
 	"net"
 	"os"
 	"os/exec"
@@ -645,7 +644,7 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 			handler := &captureHandler{}
 			srv, err := astExecServerStart("127.0.0.1", port, handler)
 			require.NoError(t, err)
-			t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+			t.Cleanup(func() { _ = srv.Stop(t.Context()) })
 
 			// run the instrumented program
 			var cmd *exec.Cmd
