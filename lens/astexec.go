@@ -39,7 +39,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	storage Storage, maxVariableRecurse, maxFieldLen int, // values impact memory usage
 	changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
 	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
-	env := goEnv(gopath, gomodcache)
+	env := GoEnv(gopath, gomodcache)
 
 	if err := goCacheClean(env); err != nil { // will be cleaned at the end of each analysis also
 		return 0, 0, nil, nil, fmt.Errorf("failure to clean go cache: %w", err)

@@ -10,8 +10,8 @@ import (
 	"github.com/go-analyze/bulk"
 )
 
-// goEnv returns environment entries for GOPATH and GOMODCACHE.
-func goEnv(gopath, gomodcache string) []string {
+// GoEnv returns environment entries for GOPATH and GOMODCACHE.
+func GoEnv(gopath, gomodcache string) []string {
 	env := make([]string, 0, 2)
 	if gopath != "" {
 		env = append(env, "GOPATH="+gopath)
