@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// ErrorLogPrefix is used to prefix unexpected error log messages.
 const ErrorLogPrefix = "!! "
 
 // ErrGroupLimitCPU returns an errgroup limited to NumCPU.

@@ -24,7 +24,8 @@ import (
 
 const logModuleErrors = false
 
-// FindModuleVersionInGoMod parses the given go.mod file to find the version of modName.
+// FindModuleVersionInGoMod parses the given go.mod file to find the version of the specified module.
+// Returns empty string if the module is not found in the go.mod file.
 func FindModuleVersionInGoMod(goModFile, modName string) (string, bool, error) {
 	data, err := os.ReadFile(goModFile)
 	if err != nil {
