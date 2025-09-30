@@ -3,10 +3,12 @@ package lens
 import (
 	"bytes"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -794,6 +796,216 @@ func Foo(n int) interface{} {
 					assert.True(t, haveTmp)
 				} else if i == 1 {
 					assert.False(t, haveTmp)
+				}
+			}
+		})
+	}
+}
+
+// TestReturnNilToInterface tests the fix for "use of untyped nil in assignment"
+// when returning nil to interface types
+func TestReturnNilToInterface(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		src          string
+		resultType   string
+		expectTmpVar bool // Should we expect a temporary variable?
+	}{
+		{
+			name: "nil_to_error",
+			src: `package foo
+func GetError() error {
+	return nil
+}`,
+			resultType:   "error",
+			expectTmpVar: false, // error is a named type, doesn't trigger needTmp
+		},
+		{
+			name: "nil_to_empty_interface",
+			src: `package foo
+func GetAny() interface{} {
+	return nil
+}`,
+			resultType:   "interface{}",
+			expectTmpVar: true,
+		},
+		{
+			name: "nil_to_pointer",
+			src: `package foo
+func GetPtr() *int {
+	return nil
+}`,
+			resultType:   "*int",
+			expectTmpVar: false, // pointers don't need temp
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "test.go", tc.src, 0)
+			require.NoError(t, err)
+			var buf bytes.Buffer
+
+			fn := file.Decls[0].(*ast.FuncDecl)
+			var ret *ast.ReturnStmt
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if r, ok := n.(*ast.ReturnStmt); ok {
+					ret = r
+					return false
+				}
+				return true
+			})
+			require.NotNil(t, ret)
+
+			resultType, err := parser.ParseExpr(tc.resultType)
+			require.NoError(t, err)
+
+			decls := visibleDeclsBefore(fn, ret.Pos())
+			blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Test"}, decls,
+				[]ast.Expr{resultType}, nil, []string{""})
+			require.NoError(t, err)
+
+			// Format the block to ensure it's valid Go code
+			var genBuf bytes.Buffer
+			err = format.Node(&genBuf, token.NewFileSet(), blk)
+			require.NoError(t, err, "Should generate valid Go code")
+
+			// Check we don't generate invalid "tmpX := nil"
+			generated := genBuf.String()
+			assert.NotContains(t, generated, "lenSyntheticTmp0 := nil",
+				"Should not generate untyped nil assignment")
+
+			// Check that the generated code handles nil correctly
+			// Even if not using temp, nil should be handled properly
+			if ret.Results[0].(*ast.Ident).Name == "nil" {
+				// nil returns should not cause invalid syntax
+				assert.NotContains(t, generated, ":= nil",
+					"Should not have untyped nil in short variable declaration")
+			}
+		})
+	}
+}
+
+// TestMakeReturnTempNilHandling directly tests makeReturnTemp with nil
+func TestMakeReturnTempNilHandling(t *testing.T) {
+	t.Parallel()
+
+	// Test that nil is handled correctly
+	nilIdent := ast.NewIdent("nil")
+	errorType := ast.NewIdent("error")
+
+	retId, stmts, snap := makeReturnTemp("lenSyntheticRet", 0, nilIdent, errorType)
+
+	assert.NotNil(t, retId)
+	assert.Equal(t, "lenSyntheticRet0", retId.Name)
+	assert.NotNil(t, snap)
+
+	// Should only have one statement (var declaration)
+	assert.Len(t, stmts, 1)
+
+	// Format and check it's valid
+	var buf bytes.Buffer
+	err := format.Node(&buf, token.NewFileSet(), stmts[0])
+	require.NoError(t, err, "Should generate valid Go statement")
+
+	// Should be "var lenSyntheticRet0 error = nil"
+	generated := buf.String()
+	assert.Contains(t, generated, "var lenSyntheticRet0 error = nil")
+	assert.NotContains(t, generated, ":= nil", "Should not use := with nil")
+}
+
+// TestImplicitReturnInstrumentation tests handling of functions with no explicit return
+func TestImplicitReturnInstrumentation(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name           string
+		src            string
+		expectReturn   bool
+		returnVarNames []string
+	}{
+		{
+			name: "named_returns_no_explicit_return",
+			src: `package foo
+func GetValue() (result int) {
+	result = 42
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"result"},
+		},
+		{
+			name: "multiple_named_returns",
+			src: `package foo
+func GetPair() (x, y int) {
+	x, y = 1, 2
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"x", "y"},
+		},
+		{
+			name: "void_function",
+			src: `package foo
+func DoNothing() {
+	x := 1
+	_ = x
+}`,
+			expectReturn:   false,
+			returnVarNames: nil, // nil for void functions (matches actual behavior)
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "test.go", tc.src, 0)
+			require.NoError(t, err)
+
+			fn := file.Decls[0].(*ast.FuncDecl)
+
+			// Simulate the logic from InjectFuncPointReturnStates
+			var funcResultNames []string
+			if fn.Type.Results != nil {
+				for _, field := range fn.Type.Results.List {
+					if len(field.Names) == 0 {
+						funcResultNames = append(funcResultNames, "")
+					} else {
+						for _, id := range field.Names {
+							funcResultNames = append(funcResultNames, id.Name)
+						}
+					}
+				}
+			}
+
+			assert.Equal(t, tc.returnVarNames, funcResultNames)
+
+			// Check if we should add a return statement
+			// The logic matches InjectFuncPointReturnStates: allNamed requires all to have names
+			allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
+			assert.Equal(t, tc.expectReturn, allNamed,
+				"allNamed calculation mismatch for %s", tc.name)
+
+			if allNamed {
+				// Build the return statement that would be added
+				returnExprs := make([]ast.Expr, len(funcResultNames))
+				for i, name := range funcResultNames {
+					returnExprs[i] = ast.NewIdent(name)
+				}
+				retStmt := &ast.ReturnStmt{Results: returnExprs}
+
+				// Format it to check validity
+				var buf bytes.Buffer
+				err := format.Node(&buf, token.NewFileSet(), retStmt)
+				require.NoError(t, err, "Return statement should be valid")
+
+				// Check it has the right variables
+				generated := buf.String()
+				for _, name := range tc.returnVarNames {
+					if name != "" {
+						assert.Contains(t, generated, name)
+					}
 				}
 			}
 		})

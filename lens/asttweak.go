@@ -562,6 +562,16 @@ func (m *astModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 		}
 
 		funcDecl.Body.List = append(funcDecl.Body.List, stmt)
+
+		// If function has named return values, add explicit return statement to maintain validity
+		allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
+		if allNamed {
+			returnExprs := make([]ast.Expr, len(funcResultNames))
+			for i, name := range funcResultNames {
+				returnExprs[i] = ast.NewIdent(name)
+			}
+			funcDecl.Body.List = append(funcDecl.Body.List, &ast.ReturnStmt{Results: returnExprs})
+		}
 	}
 	// mark as updated
 	if funcDecl.Doc == nil {
