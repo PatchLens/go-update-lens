@@ -986,12 +986,22 @@ func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 func makeReturnTemp(namePrefix string, i int, expr ast.Expr, typ ast.Expr) (retId *ast.Ident, stmts []ast.Stmt, snap ast.Expr) {
 	iStr := strconv.Itoa(i)
 	retId = ast.NewIdent(namePrefix + iStr)
-	tmpId := ast.NewIdent(syntheticFieldNamePrefixTemp + iStr)
-	stmts = []ast.Stmt{
-		&ast.AssignStmt{Lhs: []ast.Expr{tmpId}, Tok: token.DEFINE, Rhs: []ast.Expr{expr}},
-		&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
-			&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{tmpId}},
-		}}},
+	if ident, ok := expr.(*ast.Ident); ok && ident.Name == literalNil {
+		// var retX Type = nil (with explicit type to avoid "untyped nil" error)
+		stmts = []ast.Stmt{
+			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
+				&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{expr}},
+			}}},
+		}
+	} else {
+		// Normal path: tmpX := expr; var retX Type = tmpX
+		tmpId := ast.NewIdent(syntheticFieldNamePrefixTemp + iStr)
+		stmts = []ast.Stmt{
+			&ast.AssignStmt{Lhs: []ast.Expr{tmpId}, Tok: token.DEFINE, Rhs: []ast.Expr{expr}},
+			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
+				&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{tmpId}},
+			}}},
+		}
 	}
 	snap = makeSnapshotLit(retId.Name, retId)
 	return
