@@ -581,10 +581,32 @@ func (d *DefaultTestResultAnalyzer) loadTestResult(storage Storage, funcIdent st
 type DefaultStorageProvider struct {
 	Path    string
 	CacheMB int
+	store   Storage
 }
 
 func (d *DefaultStorageProvider) NewStorage() (Storage, error) {
-	return NewBadgerStorage(d.Path, d.CacheMB)
+	if d.store == nil {
+		if d.Path == "" {
+			d.Path = filepath.Join(os.TempDir(),
+				fmt.Sprintf("lens_state-%d-%s",
+					os.Getpid(), strconv.FormatInt(time.Now().UnixNano(), 16)))
+		}
+		store, err := NewBadgerStorage(d.Path, d.CacheMB)
+		if err != nil {
+			return nil, err
+		}
+		d.store = store
+	}
+	return d.store, nil
+}
+
+// SingletonStorageProvider is a StorageProvider that returns a single consistent storage instance.
+type SingletonStorageProvider struct {
+	Store Storage
+}
+
+func (s *SingletonStorageProvider) NewStorage() (Storage, error) {
+	return s.Store, nil
 }
 
 // DefaultReportWriter provides the standard implementation of ReportWriter.
@@ -626,9 +648,6 @@ func NewAnalysisEngine(config *Config) *AnalysisEngine {
 		MutationTester:         &DefaultMutationTester{},
 		TestResultAnalyzer:     &DefaultTestResultAnalyzer{},
 		StorageProvider: &DefaultStorageProvider{
-			Path: filepath.Join(os.TempDir(),
-				fmt.Sprintf("lens_state-%d-%s",
-					os.Getpid(), strconv.FormatInt(time.Now().UnixNano(), 16))),
 			CacheMB: config.CacheMB,
 		},
 		ReportWriter: &DefaultReportWriter{},
