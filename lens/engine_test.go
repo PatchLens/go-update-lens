@@ -1094,19 +1094,19 @@ func TestDefaultTestResultAnalyzer_DiffValues(t *testing.T) {
 			name:     "both hashed values",
 			v1:       HashFieldValuePrefix + "abc123",
 			v2:       HashFieldValuePrefix + "def456",
-			expected: "<VALUES TOO LARGE>",
+			expected: "<VALUE TOO LARGE ...c123> != <VALUE TOO LARGE ...f456>",
 		},
 		{
 			name:     "first value hashed",
 			v1:       HashFieldValuePrefix + "abc123",
 			v2:       "normal value",
-			expected: "<VALUE TOO LARGE> != \"" + HashFieldValuePrefix + "abc123\"",
+			expected: "<VALUE TOO LARGE ...c123> != \"normal value\"",
 		},
 		{
 			name:     "second value hashed",
 			v1:       "normal value",
 			v2:       HashFieldValuePrefix + "abc123",
-			expected: "\"" + HashFieldValuePrefix + "abc123" + "\" != <VALUE TOO LARGE>",
+			expected: "\"normal value\" != <VALUE TOO LARGE ...c123>",
 		},
 		{
 			name:          "simple string diff",
@@ -1169,12 +1169,6 @@ func TestDefaultTestResultAnalyzer_DiffValues(t *testing.T) {
 			v2:            strings.Repeat("b", 100),
 			expected:      "@@ -1 +1 @@\n-" + strings.Repeat("a", 100) + "\n+" + strings.Repeat("b", 100) + "\n",
 			isUnifiedDiff: true,
-		},
-		{
-			name:     "hash prefix but not really hashed",
-			v1:       "vsha1-but-not-really-a-hash",
-			v2:       "vsha1-different-fake-hash",
-			expected: "<VALUES TOO LARGE>",
 		},
 		{
 			name:          "partial hash prefix match v1",

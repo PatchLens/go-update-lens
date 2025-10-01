@@ -305,11 +305,26 @@ func (d *DefaultTestResultAnalyzer) DiffValues(v1, v2 string) string {
 	preHashed := strings.HasPrefix(v1, HashFieldValuePrefix)
 	postHashed := strings.HasPrefix(v2, HashFieldValuePrefix)
 	if preHashed && postHashed {
-		return "<VALUES TOO LARGE>"
+		var v1Suffix, v2Suffix string
+		if len(v1) >= 4 {
+			v1Suffix = v1[len(v1)-4:]
+		}
+		if len(v2) >= 4 {
+			v2Suffix = v2[len(v2)-4:]
+		}
+		return fmt.Sprintf("<VALUE TOO LARGE ...%s> != <VALUE TOO LARGE ...%s>", v1Suffix, v2Suffix)
 	} else if preHashed {
-		return fmt.Sprintf("<VALUE TOO LARGE> != %q", v1)
+		var v1Suffix string
+		if len(v1) >= 4 {
+			v1Suffix = v1[len(v1)-4:]
+		}
+		return fmt.Sprintf("<VALUE TOO LARGE ...%s> != %q", v1Suffix, v2)
 	} else if postHashed {
-		return fmt.Sprintf("%q != <VALUE TOO LARGE>", v2)
+		var v2Suffix string
+		if len(v2) >= 4 {
+			v2Suffix = v2[len(v2)-4:]
+		}
+		return fmt.Sprintf("%q != <VALUE TOO LARGE ...%s>", v1, v2Suffix)
 	}
 	// else, build a unified diff of the raw values
 	diff := difflib.UnifiedDiff{
