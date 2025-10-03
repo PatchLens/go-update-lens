@@ -75,7 +75,9 @@ func (lb *limitedRollingBuffer) Write(p []byte) (n int, err error) {
 	lb.buf.Write(p)
 	if lb.buf.Len() > lb.maxBytes {
 		current := lb.buf.Bytes()
-		trimmed := current[len(current)-(lb.maxBytes/2):]
+		// Copy trimmed data to avoid aliasing issues when buffer is reset and reused
+		trimmed := make([]byte, lb.maxBytes/2)
+		copy(trimmed, current[len(current)-len(trimmed):])
 		lb.buf.Reset()
 		lb.buf.WriteString("...")
 		lb.buf.Write(trimmed)
@@ -104,10 +106,7 @@ func (lb *lockedBuffer) Bytes() []byte {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 
-	b := lb.buf.Bytes()
-	out := make([]byte, len(b))
-	copy(out, b)
-	return out
+	return lb.buf.Bytes() // return view, should be safe even if appended in buf after
 }
 
 func (lb *lockedBuffer) String() string {

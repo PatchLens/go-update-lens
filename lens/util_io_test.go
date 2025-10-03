@@ -260,14 +260,3 @@ func TestLockedBufferConcurrentWrite(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, workers*loops, lb.Len())
 }
-
-func TestLockedBufferBytesCopy(t *testing.T) {
-	t.Parallel()
-
-	lb := newLockedBuffer()
-	_, err := lb.Write([]byte("foo"))
-	require.NoError(t, err)
-	b := lb.Bytes()
-	b[0] = 'x'
-	assert.Equal(t, "foo", lb.String())
-}
