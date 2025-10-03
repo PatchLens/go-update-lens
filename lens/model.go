@@ -382,7 +382,14 @@ func (tr *TestResult) marshalMsgpack(enc *msgpack.Encoder, buf *bytes.Buffer) ([
 		FVNodeDict:       fvnDict,
 		STDict:           stDict,
 	})
-	return buf.Bytes(), err
+	if err != nil {
+		return nil, err
+	}
+	// Create a copy since buf.Bytes() returns a view to the internal buffer
+	b := buf.Bytes()
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out, nil
 }
 
 func (tr *TestResult) UnmarshalMsgpack(data []byte) error {
