@@ -38,7 +38,8 @@ const (
 func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart int,
 	storage Storage, maxVariableRecurse, maxFieldLen int, // values impact memory usage
 	changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
+	extensionPointConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error)) (int, int, Storage, Storage, error) {
 	env := GoEnv(gopath, gomodcache)
 
 	if err := goCacheClean(env); err != nil { // will be cleaned at the end of each analysis also
@@ -70,7 +71,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	projectFieldChecks1, moduleChangesReached, err :=
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			nil, preStorage,
-			slices.Collect(maps.Values(reachableModuleChanges)), callingFunctions, testFunctions)
+			slices.Collect(maps.Values(reachableModuleChanges)), callingFunctions, testFunctions, extensionPointConfig)
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, nil, nil, err
 	}
@@ -129,7 +130,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			preStorage, postStorage,
 			nil, // module change function definitions are not valid for the updated version
-			callingFunctions, testFunctions)
+			callingFunctions, testFunctions, extensionPointConfig)
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
 	}
@@ -150,7 +151,8 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 
 func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	srvChan chan *astServer, goroot, projectDir string, stableResultsStorage Storage, storage Storage,
-	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, error) {
+	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction,
+	extensionPointConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error)) (int, int, error) {
 	astEditor := &ASTModifier{}
 	defer func() {
 		errs := astEditor.Restore(env)
@@ -159,8 +161,8 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 		}
 	}()
 
-	projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, err :=
-		injectMonitorPoints(astEditor, maxVariableRecurse, maxFieldLen, moduleChanges, callerFunctions)
+	projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent, err :=
+		injectMonitorPoints(astEditor, maxVariableRecurse, maxFieldLen, moduleChanges, callerFunctions, extensionPointConfig)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -198,7 +200,7 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 			failureOutput, testResult, fieldCheckCount, testModuleChangesReached, err :=
 				runMonitoredTest(envWithPort, goroot, projectDir, srv, buf, stableResults,
 					projectStatePointIdToIdent, projectPanicPointIdToIdent,
-					moduleEntryPointIdToIdent, modulePanicPointIdToIdent,
+					moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent,
 					tFunc)
 			if err != nil {
 				return err
@@ -251,8 +253,9 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 }
 
 func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen int,
-	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction) (
-	map[int]*string, map[int]*string, map[int]*string, map[int]*string, error) {
+	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction,
+	extensionPointConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error)) (
+	map[int]*string, map[int]*string, map[int]*string, map[int]*string, map[int]*string, error) {
 	pointIdLock := sync.Mutex{}
 	projectStatePointIdToIdent := make(map[int]*string)
 	projectPanicPointIdToIdent := make(map[int]*string)
@@ -416,18 +419,31 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 		log.Printf("Monitor injected in %v relevant module functions (%v pkgs)", len(moduleChanges), len(modulePkgs))
 	}
 	if err := errGrp.Wait(); err != nil { // wait for AST modifications to finish
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
+
+	var extensionStatePointIdToIdent map[int]*string
+	if extensionPointConfig != nil {
+		var err error
+		extensionStatePointIdToIdent, err = extensionPointConfig(astEditor, moduleChanges, callerFunctions)
+		if err != nil {
+			return nil, nil, nil, nil, nil, fmt.Errorf("extension point configuration failed: %w", err)
+		}
+		if len(extensionStatePointIdToIdent) > 0 {
+			log.Printf("Extension points configured: %d", len(extensionStatePointIdToIdent))
+		}
+	}
+
 	return projectStatePointIdToIdent, projectPanicPointIdToIdent,
-		moduleEntryPointIdToIdent, modulePanicPointIdToIdent, nil
+		moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent, nil
 }
 
 func runMonitoredTest(env []string, goroot, projectDir string, srv *astServer, execOutput *bytes.Buffer,
 	stableResults map[string][]CallFrame,
 	projectStatePointIdToIdent, projectPanicPointIdToIdent,
-	moduleEntryPointIdToIdent, modulePanicPointIdToIdent map[int]*string, tFunc *TestFunction) (string, TestResult, int, []*string, error) {
+	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string, tFunc *TestFunction) (string, TestResult, int, []*string, error) {
 	pointHandler1 := newTestMonitor(stableResults, goroot, projectDir,
-		projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent)
+		projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent)
 	if err := srv.SetPointHandler(pointHandler1); err != nil {
 		return "", TestResult{}, 0, nil, err
 	}
@@ -450,7 +466,7 @@ func runMonitoredTest(env []string, goroot, projectDir string, srv *astServer, e
 
 	// second run to compare against
 	pointHandler2 := newTestMonitor(nil, goroot, projectDir,
-		projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent)
+		projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent)
 	if err := srv.SetPointHandler(pointHandler2); err != nil {
 		return "", TestResult{}, 0, nil, err
 	}
@@ -476,29 +492,32 @@ func cleanExecOutput(execOutput *bytes.Buffer) string {
 }
 
 func newTestMonitor(stableResults map[string][]CallFrame, goroot, projectDir string, projectStatePointIdToIdent, projectPanicPointIdToIdent,
-	moduleEntryPointIdToIdent, modulePanicPointIdToIdent map[int]*string) *testMonitor {
+	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string) *testMonitor {
 	return &testMonitor{
-		stableResults:              stableResults,
-		goroot:                     goroot,
-		projectDir:                 projectDir,
-		projectStatePointIdToIdent: projectStatePointIdToIdent,
-		projectPanicPointIdToIdent: projectPanicPointIdToIdent,
-		moduleEntryPointIdToIdent:  moduleEntryPointIdToIdent,
-		modulePanicPointIdToIdent:  modulePanicPointIdToIdent,
-		pointLocks:                 newDefaultStripedMutex(),
-		callerFrames:               make(map[string][]CallFrame),
-		projectPanics:              make(map[string][]string),
-		modulePanics:               make(map[string][]string),
+		stableResults:                stableResults,
+		goroot:                       goroot,
+		projectDir:                   projectDir,
+		projectStatePointIdToIdent:   projectStatePointIdToIdent,
+		projectPanicPointIdToIdent:   projectPanicPointIdToIdent,
+		moduleEntryPointIdToIdent:    moduleEntryPointIdToIdent,
+		modulePanicPointIdToIdent:    modulePanicPointIdToIdent,
+		extensionStatePointIdToIdent: extensionStatePointIdToIdent,
+		pointLocks:                   newDefaultStripedMutex(),
+		callerFrames:                 make(map[string][]CallFrame),
+		extensionFrames:              make(map[string][]CallFrame),
+		projectPanics:                make(map[string][]string),
+		modulePanics:                 make(map[string][]string),
 	}
 }
 
 type testMonitor struct {
 	// maps created by AST injection for quick lookups
-	projectStatePointIdToIdent map[int]*string
-	projectPanicPointIdToIdent map[int]*string
-	moduleEntryPointIdToIdent  map[int]*string
-	modulePanicPointIdToIdent  map[int]*string
-	pointLocks                 *stripedMutex
+	projectStatePointIdToIdent   map[int]*string
+	projectPanicPointIdToIdent   map[int]*string
+	moduleEntryPointIdToIdent    map[int]*string
+	modulePanicPointIdToIdent    map[int]*string
+	extensionStatePointIdToIdent map[int]*string
+	pointLocks                   *stripedMutex
 
 	// runtime config
 	goroot        string
@@ -510,6 +529,8 @@ type testMonitor struct {
 	fieldCheckCount      atomic.Uint32 // number of LensMonitorMessagePointState hits
 	callerFramesMu       sync.Mutex    // protects callerFrames
 	callerFrames         map[string][]CallFrame
+	extensionFramesMu    sync.Mutex // protects extensionFrames
+	extensionFrames      map[string][]CallFrame
 	panicMu              sync.Mutex
 	projectPanics        map[string][]string
 	modulePanics         map[string][]string
@@ -611,13 +632,22 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 		fieldLog("", msg.Fields)
 	}
 
-	callerIdent, ok := t.projectStatePointIdToIdent[msg.PointID]
-	if !ok {
-		log.Printf("%sUnexpected state point id: %d", ErrorLogPrefix, msg.PointID)
-		return
+	// Check if this is an extension point
+	extensionFrameKey, isExtension := t.extensionStatePointIdToIdent[msg.PointID]
+
+	var storageKey string
+	if isExtension {
+		storageKey = *extensionFrameKey
+	} else {
+		callerIdent, ok := t.projectStatePointIdToIdent[msg.PointID]
+		if !ok {
+			log.Printf("%sUnexpected state point id: %d", ErrorLogPrefix, msg.PointID)
+			return
+		}
+		storageKey = *callerIdent
 	}
 
-	lock := t.pointLocks.Lock(*callerIdent)
+	lock := t.pointLocks.Lock(storageKey)
 	go func() {
 		defer t.wait.Done()
 		defer lock.Unlock()
@@ -638,63 +668,121 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 		for _, sf := range msg.Fields {
 			collectFields(fieldMap, sf.Name, sf.Value, sf.Type, sf.Children)
 		}
-		callerIdentStr := *callerIdent
 
-		t.callerFramesMu.Lock()
-		defer t.callerFramesMu.Unlock()
+		// Apply stable results filtering and store in appropriate map
+		if isExtension {
+			t.extensionFramesMu.Lock()
+			defer t.extensionFramesMu.Unlock()
 
-		if t.stableResults != nil { // filter by stableResults if present (memory optimization)
-			frames, ok := t.stableResults[callerIdentStr]
-			var bb bytes.Buffer
-			if !ok {
-				for k := range fieldMap {
-					delete(fieldMap, k)
-				}
-			} else {
-				pStack := ProjectFrames(stack)
-				pKey := StackFramesKey(&bb, pStack)
-
-				var targetOccur int
-				for _, cf := range t.callerFrames[callerIdentStr] {
-					if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
-						targetOccur++
-					}
-				}
-
-				idx := -1
-				var occ int
-				for i := range frames {
-					if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
-						if occ == targetOccur {
-							idx = i
-							break
-						}
-						occ++
-					}
-				}
-
-				if idx >= 0 {
-					allowed := frames[idx].FieldValues
-					for fname := range fieldMap {
-						if _, ok := allowed[fname]; !ok {
-							delete(fieldMap, fname)
-						}
-					}
-				} else {
+			if t.stableResults != nil { // filter by stableResults if present (memory optimization)
+				frames, ok := t.stableResults[storageKey]
+				var bb bytes.Buffer
+				if !ok {
 					for k := range fieldMap {
 						delete(fieldMap, k)
 					}
+				} else {
+					pStack := ProjectFrames(stack)
+					pKey := StackFramesKey(&bb, pStack)
+
+					var targetOccur int
+					for _, cf := range t.extensionFrames[storageKey] {
+						if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
+							targetOccur++
+						}
+					}
+
+					idx := -1
+					var occ int
+					for i := range frames {
+						if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
+							if occ == targetOccur {
+								idx = i
+								break
+							}
+							occ++
+						}
+					}
+
+					if idx >= 0 {
+						allowed := frames[idx].FieldValues
+						for fname := range fieldMap {
+							if _, ok := allowed[fname]; !ok {
+								delete(fieldMap, fname)
+							}
+						}
+					} else {
+						for k := range fieldMap {
+							delete(fieldMap, k)
+						}
+					}
 				}
 			}
-		}
 
-		t.callerFrames[callerIdentStr] =
-			append(t.callerFrames[callerIdentStr],
-				CallFrame{
-					FieldValues: fieldMap,
-					Stack:       stack,
-					TimeMillis:  uint32((msg.TimeNS + 500000) / 1_000_000),
-				})
+			t.extensionFrames[storageKey] =
+				append(t.extensionFrames[storageKey],
+					CallFrame{
+						FieldValues: fieldMap,
+						Stack:       stack,
+						TimeMillis:  uint32((msg.TimeNS + 500000) / 1_000_000),
+					})
+		} else {
+			t.callerFramesMu.Lock()
+			defer t.callerFramesMu.Unlock()
+
+			if t.stableResults != nil { // filter by stableResults if present (memory optimization)
+				frames, ok := t.stableResults[storageKey]
+				var bb bytes.Buffer
+				if !ok {
+					for k := range fieldMap {
+						delete(fieldMap, k)
+					}
+				} else {
+					pStack := ProjectFrames(stack)
+					pKey := StackFramesKey(&bb, pStack)
+
+					var targetOccur int
+					for _, cf := range t.callerFrames[storageKey] {
+						if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
+							targetOccur++
+						}
+					}
+
+					idx := -1
+					var occ int
+					for i := range frames {
+						if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
+							if occ == targetOccur {
+								idx = i
+								break
+							}
+							occ++
+						}
+					}
+
+					if idx >= 0 {
+						allowed := frames[idx].FieldValues
+						for fname := range fieldMap {
+							if _, ok := allowed[fname]; !ok {
+								delete(fieldMap, fname)
+							}
+						}
+					} else {
+						for k := range fieldMap {
+							delete(fieldMap, k)
+						}
+					}
+				}
+			}
+
+			t.callerFrames[storageKey] =
+				append(t.callerFrames[storageKey],
+					CallFrame{
+						FieldValues: fieldMap,
+						Stack:       stack,
+						TimeMillis:  uint32((msg.TimeNS + 500000) / 1_000_000),
+					})
+		}
 	}()
 }
 
@@ -740,6 +828,7 @@ func (t *testMonitor) makeTestResult(tFunc *TestFunction, failure bool) TestResu
 	return TestResult{
 		TestFunction:     tFunc.Minimum(),
 		CallerResults:    t.callerFrames,
+		ExtensionFrames:  t.extensionFrames,
 		ProjectPanics:    t.projectPanics,
 		ModulePanics:     t.modulePanics,
 		ModuleChangesHit: t.getModuleChangesReachCount(),
@@ -776,52 +865,59 @@ func (t *testMonitor) getModuleChangesReached() (out []*string) {
 // that were exactly the same between the two runs.
 func testResultStableFields(r1, r2 TestResult) TestResult {
 	var bb bytes.Buffer
-	commonCallerResults := make(map[string][]CallFrame, len(r1.CallerResults))
-	for callerIdent, frames1 := range r1.CallerResults {
-		frames2, ok := r2.CallerResults[callerIdent]
-		if !ok {
-			log.Printf("%sUnexpected missing results for %s", ErrorLogPrefix, callerIdent)
-			continue
-		}
 
-		// sort both frame slices by client time for the most reliable ordering
-		callFrameSortFunc := func(a, b CallFrame) int {
-			if a.TimeMillis < b.TimeMillis {
-				return -1
-			} else if a.TimeMillis > b.TimeMillis {
-				return 1
-			}
-			return 0
-		}
-		slices.SortStableFunc(frames1, callFrameSortFunc)
-		slices.SortStableFunc(frames2, callFrameSortFunc)
-
-		frames2ByKey := bulk.SliceToGroupsBy(func(f CallFrame) string {
-			return StackFramesKey(&bb, ProjectFrames(f.Stack))
-		}, frames2)
-
-		used := make(map[string]int, len(frames1))
-		commonFrames := make([]CallFrame, 0, len(frames1))
-		for _, frame1 := range frames1 {
-			key := StackFramesKey(&bb, ProjectFrames(frame1.Stack))
-			idx := used[key]
-			used[key] = idx + 1
-			if idx >= len(frames2ByKey[key]) {
+	// Helper function to compute stable frames from two frame maps
+	computeStableFrames := func(frames1Map, frames2Map map[string][]CallFrame) map[string][]CallFrame {
+		result := make(map[string][]CallFrame, len(frames1Map))
+		for ident, frames1 := range frames1Map {
+			frames2, ok := frames2Map[ident]
+			if !ok {
 				continue
 			}
-			frame2 := frames2ByKey[key][idx]
 
-			stableValues := stableFieldValues(frame1.FieldValues, frame2.FieldValues)
+			// sort both frame slices by client time for the most reliable ordering
+			callFrameSortFunc := func(a, b CallFrame) int {
+				if a.TimeMillis < b.TimeMillis {
+					return -1
+				} else if a.TimeMillis > b.TimeMillis {
+					return 1
+				}
+				return 0
+			}
+			slices.SortStableFunc(frames1, callFrameSortFunc)
+			slices.SortStableFunc(frames2, callFrameSortFunc)
 
-			commonFrames = append(commonFrames, CallFrame{
-				FieldValues: stableValues,
-				Stack:       frame1.Stack,
-				TimeMillis:  frame1.TimeMillis,
-			})
+			frames2ByKey := bulk.SliceToGroupsBy(func(f CallFrame) string {
+				return StackFramesKey(&bb, ProjectFrames(f.Stack))
+			}, frames2)
+
+			used := make(map[string]int, len(frames1))
+			commonFrames := make([]CallFrame, 0, len(frames1))
+			for _, frame1 := range frames1 {
+				key := StackFramesKey(&bb, ProjectFrames(frame1.Stack))
+				idx := used[key]
+				used[key] = idx + 1
+				if idx >= len(frames2ByKey[key]) {
+					continue
+				}
+				frame2 := frames2ByKey[key][idx]
+
+				stableValues := stableFieldValues(frame1.FieldValues, frame2.FieldValues)
+
+				commonFrames = append(commonFrames, CallFrame{
+					FieldValues: stableValues,
+					Stack:       frame1.Stack,
+					TimeMillis:  frame1.TimeMillis,
+				})
+			}
+
+			result[ident] = commonFrames
 		}
-
-		commonCallerResults[callerIdent] = commonFrames
+		return result
 	}
+
+	commonCallerResults := computeStableFrames(r1.CallerResults, r2.CallerResults)
+	commonExtensionFrames := computeStableFrames(r1.ExtensionFrames, r2.ExtensionFrames)
 
 	intersectPanics := func(m1, m2 map[string][]string) map[string][]string {
 		out := make(map[string][]string, len(m1))
@@ -844,6 +940,7 @@ func testResultStableFields(r1, r2 TestResult) TestResult {
 	return TestResult{
 		TestFunction:     r1.TestFunction,
 		CallerResults:    commonCallerResults,
+		ExtensionFrames:  commonExtensionFrames,
 		ProjectPanics:    intersectPanics(r1.ProjectPanics, r2.ProjectPanics),
 		ModulePanics:     intersectPanics(r1.ModulePanics, r2.ModulePanics),
 		ModuleChangesHit: r1.ModuleChangesHit,

@@ -270,14 +270,20 @@ func (d *DefaultTestProvider) ProvideTests(config Config, callingFunctions []*Ca
 func (d *DefaultTestProvider) Cleanup() {}
 
 // DefaultUpdateAnalysisProvider provides the standard implementation of UpdateAnalysisProvider.
-type DefaultUpdateAnalysisProvider struct{}
+type DefaultUpdateAnalysisProvider struct {
+	// ExtensionPointConfig is an optional function that extensions can use to inject additional
+	// monitoring points during AST instrumentation. The function receives the ASTModifier and
+	// changed module/caller functions, and returns a map of point IDs to frame keys for storage.
+	// The returned map is used to route LensMonitorMessagePointState events to ExtensionFrames.
+	ExtensionPointConfig func(astEditor *ASTModifier, moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction) (map[int]*string, error)
+}
 
 func (d *DefaultUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config,
 	storage Storage, changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
 	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
 	return RunModuleUpdateAnalysis(config.Gopath, config.Gomodcache, config.AbsProjDir, config.AstMonitorPort,
 		storage, config.MaxFieldRecurse, config.MaxFieldLen,
-		changedModules, reachableModuleChanges, callingFunctions, testFunctions)
+		changedModules, reachableModuleChanges, callingFunctions, testFunctions, d.ExtensionPointConfig)
 }
 
 func (d *DefaultUpdateAnalysisProvider) Cleanup() {}

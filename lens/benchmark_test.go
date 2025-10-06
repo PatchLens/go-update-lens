@@ -84,7 +84,7 @@ func BenchmarkASTClientServer(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		monitor := newTestMonitor(nil, "", "fakeProjectDir", pointMap, pointMap, pointMap, pointMap)
+		monitor := newTestMonitor(nil, "", "fakeProjectDir", pointMap, pointMap, pointMap, pointMap, nil)
 		err = srv.SetPointHandler(monitor)
 		require.NoError(b, err)
 

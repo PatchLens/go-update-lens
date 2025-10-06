@@ -727,3 +727,133 @@ func dummyFuncLevel1(skip int) []LensMonitorStackFrame {
 func dummyFuncLevel2(skip int) []LensMonitorStackFrame {
 	return captureLensMonitorStack(skip)
 }
+
+func TestExtensionPointEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+
+	t.Parallel()
+	tmp := t.TempDir()
+
+	// Source with a helper function to monitor via extension points
+	src := `package main
+import "fmt"
+
+func Helper(x int) int {
+	return x * 2
+}
+
+func Target(a int) int {
+	val := Helper(a)
+	return val + 10
+}
+
+func main() {
+	result := Target(5)
+	fmt.Println(result)
+}`
+
+	err := os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module testapp\ngo 1.22\n"), 0o644)
+	require.NoError(t, err)
+	mainPath := filepath.Join(tmp, "main.go")
+	err = os.WriteFile(mainPath, []byte(src), 0o644)
+	require.NoError(t, err)
+
+	port := freePort(t)
+
+	// Inject AST client
+	mod := &ASTModifier{}
+	err = mod.InjectASTClient(tmp, port, 5, 256)
+	require.NoError(t, err)
+
+	// Inject regular monitoring on Target function
+	targetFunc := &Function{
+		PackageName:   "main",
+		FilePath:      mainPath,
+		FunctionName:  "Target",
+		FunctionIdent: "main:Target",
+	}
+	targetPointIds, err := mod.InjectFuncPointReturnStates(targetFunc)
+	require.NoError(t, err)
+
+	// Inject extension monitoring on Helper function (simulating security sink monitoring)
+	helperFunc := &Function{
+		PackageName:   "main",
+		FilePath:      mainPath,
+		FunctionName:  "Helper",
+		FunctionIdent: "main:Helper",
+	}
+	helperPointIds, err := mod.InjectFuncPointReturnStates(helperFunc)
+	require.NoError(t, err)
+
+	// Configure extension points mapping
+	extensionKey := "test:helper:call"
+	extensionPoints := make(map[int]*string)
+	for _, pointId := range helperPointIds {
+		extensionPoints[pointId] = &extensionKey
+	}
+
+	// Configure regular project points mapping
+	targetKey := "main:Target"
+	projectPoints := make(map[int]*string)
+	for _, pointId := range targetPointIds {
+		projectPoints[pointId] = &targetKey
+	}
+
+	require.NoError(t, mod.Commit())
+
+	// Start monitoring server with testMonitor to route messages
+	srv, err := astExecServerStart("127.0.0.1", port, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(t.Context()) })
+
+	monitor := newTestMonitor(nil, "", tmp,
+		projectPoints,         // projectStatePointIdToIdent
+		make(map[int]*string), // projectPanicPointIdToIdent
+		make(map[int]*string), // moduleEntryPointIdToIdent
+		make(map[int]*string), // modulePanicPointIdToIdent
+		extensionPoints,       // extensionStatePointIdToIdent
+	)
+	err = srv.SetPointHandler(monitor)
+	require.NoError(t, err)
+
+	// Run the instrumented program
+	cmd := NewProjectLoggedExec(tmp, nil, "go", "run", ".")
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	err = cmd.Run()
+	require.NoError(t, err)
+
+	err = srv.StopOnProcessOrTimeout(cmd.Process.Pid, time.Minute)
+	require.NoError(t, err)
+
+	// Wait for async processing
+	monitor.wait.Wait()
+
+	// Verify regular caller results were captured
+	require.Contains(t, monitor.callerFrames, targetKey)
+	targetFrames := monitor.callerFrames[targetKey]
+	require.NotEmpty(t, targetFrames)
+
+	// Verify target frame captured the expected fields (a, val, ret0)
+	targetFV := targetFrames[0].FieldValues.FlattenFieldValues()
+	require.Contains(t, targetFV, "a")
+	require.Contains(t, targetFV, "val")
+	require.Contains(t, targetFV, "ret0")
+
+	// Verify extension frames were captured for helper function
+	require.Contains(t, monitor.extensionFrames, extensionKey)
+	extFrames := monitor.extensionFrames[extensionKey]
+	require.NotEmpty(t, extFrames)
+
+	// Verify extension frame captured the expected fields (x, ret0)
+	extFV := extFrames[0].FieldValues.FlattenFieldValues()
+	require.Contains(t, extFV, "x")
+	assert.Equal(t, "5", extFV["x"])
+	require.Contains(t, extFV, "ret0")
+	assert.Equal(t, "10", extFV["ret0"])
+
+	// Verify both have stack traces
+	require.NotEmpty(t, targetFrames[0].Stack)
+	require.NotEmpty(t, extFrames[0].Stack)
+}

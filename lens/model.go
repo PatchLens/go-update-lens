@@ -150,6 +150,10 @@ type TestResult struct {
 	// Extensions should use namespaced keys (e.g., "security:capabilities").
 	// Data is preserved across serialization and available during comparison.
 	ExtensionData map[string][]byte `msgpack:"ext,omitempty"`
+	// ExtensionFrames are filled in if extension AST modifications are configured through ExtensionPointConfig.
+	// Unlike ExtensionData, ExtensionFrames shares the same deduplication pool as CallerResults
+	// for efficient storage. Keys should be namespaced (e.g., "security:network:dial").
+	ExtensionFrames map[string][]CallFrame `msgpack:"ef,omitempty"`
 }
 
 // structs and code below to encode TestResult into a minimal (de-duplicated) encoding
@@ -178,6 +182,7 @@ type encTestResult struct {
 	ModuleChangesHit int                       `msgpack:"mh"`
 	TestFailure      bool                      `msgpack:"fail"`
 	ExtensionData    map[string][]byte         `msgpack:"ext,omitempty"`
+	ExtensionFrames  map[string][]encCallFrame `msgpack:"ef,omitempty"`
 
 	// ─── our two dictionaries ───
 	FVDict     []encFieldValues `msgpack:"fh,omitempty"` // for repeated FieldValues maps
@@ -233,6 +238,12 @@ func (tr *TestResult) marshalMsgpack(enc *msgpack.Encoder, buf *bytes.Buffer) ([
 		}
 	}
 	for _, frames := range tr.CallerResults {
+		for _, cf := range frames {
+			walkFV(cf.FieldValues)
+			stCount[anyKey(cf.Stack)]++
+		}
+	}
+	for _, frames := range tr.ExtensionFrames {
 		for _, cf := range frames {
 			walkFV(cf.FieldValues)
 			stCount[anyKey(cf.Stack)]++
@@ -337,53 +348,57 @@ func (tr *TestResult) marshalMsgpack(enc *msgpack.Encoder, buf *bytes.Buffer) ([
 		return ef, nil
 	}
 
-	// build CallerResults
-	encCR := make(map[string][]encCallFrame, len(tr.CallerResults))
-	for caller, frames := range tr.CallerResults {
-		row := make([]encCallFrame, len(frames))
-		for i, cf := range frames {
-			eCF := encCallFrame{
-				T: cf.TimeMillis,
-			}
-
-			// FieldValues
-			fvInline, fvIdx := encodeFV(cf.FieldValues)
-			if fvIdx != nil {
-				eCF.FVi = fvIdx
-			} else {
-				eCF.FV = fvInline
-			}
-
-			// StackFrame
-			key := anyKey(cf.Stack)
-			if stIndex != nil && stCount[key] > 1 {
-				if pos, ok := stIndex[key]; ok {
-					eCF.Si = &pos
-				} else {
-					pos := len(stDict)
-					stIndex[key] = pos
-					stDict = append(stDict, cf.Stack)
-					eCF.Si = &pos
+	// Helper function to encode call frames
+	encodeCallFrames := func(framesMap map[string][]CallFrame) map[string][]encCallFrame {
+		result := make(map[string][]encCallFrame, len(framesMap))
+		for key, frames := range framesMap {
+			row := make([]encCallFrame, len(frames))
+			for i, cf := range frames {
+				eCF := encCallFrame{
+					T: cf.TimeMillis,
 				}
-			} else {
-				eCF.St = cf.Stack
-			}
 
-			row[i] = eCF
+				// FieldValues
+				fvInline, fvIdx := encodeFV(cf.FieldValues)
+				if fvIdx != nil {
+					eCF.FVi = fvIdx
+				} else {
+					eCF.FV = fvInline
+				}
+
+				// StackFrame
+				stackKey := anyKey(cf.Stack)
+				if stIndex != nil && stCount[stackKey] > 1 {
+					if pos, ok := stIndex[stackKey]; ok {
+						eCF.Si = &pos
+					} else {
+						pos := len(stDict)
+						stIndex[stackKey] = pos
+						stDict = append(stDict, cf.Stack)
+						eCF.Si = &pos
+					}
+				} else {
+					eCF.St = cf.Stack
+				}
+
+				row[i] = eCF
+			}
+			result[key] = row
 		}
-		encCR[caller] = row
+		return result
 	}
 
 	buf.Reset()
 	enc.Reset(buf)
 	err := enc.Encode(encTestResult{
 		TestFunction:     tr.TestFunction,
-		CallerResults:    encCR,
+		CallerResults:    encodeCallFrames(tr.CallerResults),
 		ProjectPanics:    tr.ProjectPanics,
 		ModulePanics:     tr.ModulePanics,
 		ModuleChangesHit: tr.ModuleChangesHit,
 		TestFailure:      tr.TestFailure,
 		ExtensionData:    tr.ExtensionData,
+		ExtensionFrames:  encodeCallFrames(tr.ExtensionFrames),
 		FVDict:           fvDict,
 		FVNodeDict:       fvnDict,
 		STDict:           stDict,
@@ -461,32 +476,52 @@ func (tr *TestResult) UnmarshalMsgpack(data []byte) error {
 		return result, nil
 	}
 
-	for caller, encFrames := range enc.CallerResults {
-		frames := make([]CallFrame, len(encFrames))
-		for i, encFrame := range encFrames {
-			// Decode FieldValues
-			fv, err := decodeFV(encFrame.FV, encFrame.FVi)
-			if err != nil {
-				return err
-			}
-			cf := CallFrame{
-				FieldValues: fv,
-				TimeMillis:  encFrame.T,
-			}
-
-			if encFrame.Si != nil { // Decode Stack from dictionary
-				if *encFrame.Si >= 0 && *encFrame.Si < len(enc.STDict) {
-					cf.Stack = enc.STDict[*encFrame.Si]
-				} else {
-					return fmt.Errorf("invalid encoded stack index: %d", *encFrame.Si)
+	// Helper function to decode call frames
+	decodeCallFrames := func(encFramesMap map[string][]encCallFrame) (map[string][]CallFrame, error) {
+		result := make(map[string][]CallFrame, len(encFramesMap))
+		for key, encFrames := range encFramesMap {
+			frames := make([]CallFrame, len(encFrames))
+			for i, encFrame := range encFrames {
+				// Decode FieldValues
+				fv, err := decodeFV(encFrame.FV, encFrame.FVi)
+				if err != nil {
+					return nil, err
 				}
-			} else {
-				cf.Stack = encFrame.St
-			}
+				cf := CallFrame{
+					FieldValues: fv,
+					TimeMillis:  encFrame.T,
+				}
 
-			frames[i] = cf
+				if encFrame.Si != nil { // Decode Stack from dictionary
+					if *encFrame.Si >= 0 && *encFrame.Si < len(enc.STDict) {
+						cf.Stack = enc.STDict[*encFrame.Si]
+					} else {
+						return nil, fmt.Errorf("invalid encoded stack index: %d", *encFrame.Si)
+					}
+				} else {
+					cf.Stack = encFrame.St
+				}
+
+				frames[i] = cf
+			}
+			result[key] = frames
 		}
-		tr.CallerResults[caller] = frames
+		return result, nil
+	}
+
+	// Decode CallerResults
+	var err error
+	tr.CallerResults, err = decodeCallFrames(enc.CallerResults)
+	if err != nil {
+		return err
+	}
+
+	// Decode ExtensionFrames (only if non-empty)
+	if len(enc.ExtensionFrames) > 0 {
+		tr.ExtensionFrames, err = decodeCallFrames(enc.ExtensionFrames)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

@@ -276,3 +276,149 @@ func TestTrimStackFile(t *testing.T) {
 	got = trimStackFile(dir, "", mod)
 	assert.Equal(t, "github.com/foo@v1.0.0/bar.go", got)
 }
+
+func TestTestResultStableFieldsWithExtensionFrames(t *testing.T) {
+	t.Parallel()
+
+	r1 := TestResult{
+		TestFunction: MinimumTestFunction{FunctionIdent: "TestFn"},
+		CallerResults: map[string][]CallFrame{
+			"caller1": {
+				{
+					FieldValues: FieldValues{
+						"same": &FieldValue{Value: "val"},
+						"diff": &FieldValue{Value: "r1"},
+					},
+					Stack: []StackFrame{
+						{File: "file1", Line: 1, Function: "func1"},
+					},
+				},
+			},
+		},
+		ExtensionFrames: map[string][]CallFrame{
+			"security:network:dial": {
+				{
+					FieldValues: FieldValues{
+						"addr":  &FieldValue{Value: "127.0.0.1"},
+						"port":  &FieldValue{Value: "8080"},
+						"extra": &FieldValue{Value: "only1"},
+					},
+					Stack: []StackFrame{
+						{File: "./app.go", Line: 10, Function: "dialServer"},
+					},
+				},
+			},
+			"security:file:open": {
+				{
+					FieldValues: FieldValues{
+						"path": &FieldValue{Value: "/tmp/test"},
+					},
+					Stack: []StackFrame{
+						{File: "./app.go", Line: 20, Function: "openFile"},
+					},
+				},
+			},
+		},
+		ModuleChangesHit: 1,
+		TestFailure:      false,
+	}
+
+	r2 := TestResult{
+		TestFunction: MinimumTestFunction{FunctionIdent: "TestFn"},
+		CallerResults: map[string][]CallFrame{
+			"caller1": {
+				{
+					FieldValues: FieldValues{
+						"same":  &FieldValue{Value: "val"},
+						"diff":  &FieldValue{Value: "r2"},
+						"other": &FieldValue{Value: "ignored"},
+					},
+					Stack: []StackFrame{
+						{File: "file1", Line: 1, Function: "func1"},
+					},
+				},
+			},
+		},
+		ExtensionFrames: map[string][]CallFrame{
+			"security:network:dial": {
+				{
+					FieldValues: FieldValues{
+						"addr":  &FieldValue{Value: "127.0.0.1"},
+						"port":  &FieldValue{Value: "8080"},
+						"other": &FieldValue{Value: "only2"},
+					},
+					Stack: []StackFrame{
+						{File: "./app.go", Line: 10, Function: "dialServer"},
+					},
+				},
+			},
+			"security:file:open": {
+				{
+					FieldValues: FieldValues{
+						"path": &FieldValue{Value: "/tmp/different"},
+					},
+					Stack: []StackFrame{
+						{File: "./app.go", Line: 20, Function: "openFile"},
+					},
+				},
+			},
+		},
+		ModuleChangesHit: 2,
+		TestFailure:      true,
+	}
+
+	result := testResultStableFields(r1, r2)
+
+	require.Equal(t, r1.TestFunction, result.TestFunction)
+	assert.True(t, result.TestFailure)
+	assert.Equal(t, r1.ModuleChangesHit, result.ModuleChangesHit)
+
+	// Verify caller results stability
+	frames, ok := result.CallerResults["caller1"]
+	require.True(t, ok)
+	require.Len(t, frames, 1)
+	assert.Equal(t, map[string]string{"same": "val"}, frames[0].FieldValues.FlattenFieldValues())
+
+	// Verify extension frames stability
+	extFrames, ok := result.ExtensionFrames["security:network:dial"]
+	require.True(t, ok)
+	require.Len(t, extFrames, 1)
+	assert.Equal(t, map[string]string{"addr": "127.0.0.1", "port": "8080"},
+		extFrames[0].FieldValues.FlattenFieldValues())
+
+	extFileFrames, ok := result.ExtensionFrames["security:file:open"]
+	require.True(t, ok)
+	require.Len(t, extFileFrames, 1)
+	// path differs between runs, so should be empty
+	assert.Empty(t, extFileFrames[0].FieldValues.FlattenFieldValues())
+}
+
+func TestTestResultStableFieldsExtensionFramesMissing(t *testing.T) {
+	t.Parallel()
+
+	r1 := TestResult{
+		TestFunction: MinimumTestFunction{FunctionIdent: "TestFn"},
+		ExtensionFrames: map[string][]CallFrame{
+			"security:network:dial": {
+				{
+					FieldValues: FieldValues{
+						"addr": &FieldValue{Value: "127.0.0.1"},
+					},
+					Stack: []StackFrame{
+						{File: "./app.go", Line: 10, Function: "dialServer"},
+					},
+				},
+			},
+		},
+	}
+
+	r2 := TestResult{
+		TestFunction: MinimumTestFunction{FunctionIdent: "TestFn"},
+		// No extension frames in second run
+	}
+
+	result := testResultStableFields(r1, r2)
+
+	// Extension frames should not be present in result when missing in second run
+	assert.Empty(t, result.ExtensionFrames)
+}
