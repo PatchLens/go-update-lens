@@ -98,10 +98,6 @@ type TestReport struct {
 	TestRegressionCount int
 	SameFieldCount      int
 	DiffFieldCount      int
-	// ExtensionDataDiff contains differences in extension data between pre/post update.
-	// Key is the extension namespace (e.g., "security"), value is a human-readable diff summary.
-	// Extensions can provide custom diff logic via DefaultTestResultAnalyzer.ExtensionDataAnalyzer.
-	ExtensionDataDiff map[string]string
 }
 
 // ReportMap represents a report as an extensible map structure.

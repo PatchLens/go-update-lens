@@ -299,12 +299,7 @@ func (d *DefaultMutationTester) RunMutationTesting(config Config, fastMutations,
 func (d *DefaultMutationTester) Cleanup() {}
 
 // DefaultTestResultAnalyzer provides the standard implementation of TestResultAnalyzer.
-type DefaultTestResultAnalyzer struct {
-	// ExtensionDataAnalyzer is an optional custom function for comparing extension data.
-	// If set, it will be used instead of the default byte comparison in compareTestResultExtensionData.
-	// Extensions can set this to provide semantic diffs of their custom data.
-	ExtensionDataAnalyzer func(preData, postData map[string][]byte) map[string]string
-}
+type DefaultTestResultAnalyzer struct{}
 
 // DiffValues provides a simple human-readable diff explanation of two complex value types.
 // If the values are identical an empty string will be returned.
@@ -539,13 +534,6 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 		comparePanics(preResults.ProjectPanics, postResults.ProjectPanics, "project")
 		comparePanics(preResults.ModulePanics, postResults.ModulePanics, "module")
 
-		var extensionDataDiff map[string]string
-		if d.ExtensionDataAnalyzer != nil {
-			extensionDataDiff = d.ExtensionDataAnalyzer(preResults.ExtensionData, postResults.ExtensionData)
-		} else {
-			extensionDataDiff = compareTestResultExtensionData(preResults.ExtensionData, postResults.ExtensionData)
-		}
-
 		if !preResults.TestFailure && postResults.TestFailure {
 			testRegressionCount++
 			fmt.Printf("WARN: Test regression after update: %s\n", postResults.TestFunction.FunctionName)
@@ -570,7 +558,6 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 			TestRegressionCount: testRegressionCount,
 			SameFieldCount:      testSameCount,
 			DiffFieldCount:      testDiffCount,
-			ExtensionDataDiff:   extensionDataDiff,
 		}
 	}
 
@@ -593,48 +580,6 @@ func (d *DefaultTestResultAnalyzer) loadTestResult(storage Storage, funcIdent st
 		return TestResult{}, false, fmt.Errorf("error unmarshalling results: %w", err)
 	}
 	return result, true, nil
-}
-
-// compareTestResultExtensionData performs default byte-level comparison of extension data.
-// It compares extension data maps by namespace, providing simple change descriptions.
-// Returns a map of namespace -> diff summary, or nil if no differences.
-func compareTestResultExtensionData(preData, postData map[string][]byte) map[string]string {
-	if len(preData) == 0 && len(postData) == 0 {
-		return nil
-	}
-
-	diff := make(map[string]string)
-
-	// Get all unique namespaces from both pre and post
-	namespaces := make(map[string]bool)
-	for ns := range preData {
-		namespaces[ns] = true
-	}
-	for ns := range postData {
-		namespaces[ns] = true
-	}
-
-	// Compare each namespace
-	for ns := range namespaces {
-		pre := preData[ns]
-		post := postData[ns]
-
-		// Default byte comparison
-		if !bytes.Equal(pre, post) {
-			if len(pre) == 0 {
-				diff[ns] = fmt.Sprintf("Added (%d bytes)", len(post))
-			} else if len(post) == 0 {
-				diff[ns] = fmt.Sprintf("Removed (%d bytes)", len(pre))
-			} else {
-				diff[ns] = fmt.Sprintf("Changed (%d -> %d bytes)", len(pre), len(post))
-			}
-		}
-	}
-
-	if len(diff) == 0 {
-		return nil
-	}
-	return diff
 }
 
 // DefaultStorageProvider provides the standard implementation of StorageProvider using BadgerDB.

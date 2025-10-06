@@ -135,25 +135,21 @@ type MinimumTestFunction struct {
 // TestResult represents the recorded field values per test function.
 type TestResult struct {
 	// TestFunction identifies the test.
-	TestFunction MinimumTestFunction `msgpack:"tf"`
+	TestFunction MinimumTestFunction
 	// CallerResults maps callers to captured field values.
-	CallerResults map[string][]CallFrame `msgpack:"cr"`
+	CallerResults map[string][]CallFrame
 	// ProjectPanics records panic messages from project functions.
-	ProjectPanics map[string][]string `msgpack:"pp"`
+	ProjectPanics map[string][]string
 	// ModulePanics records panic messages from module functions.
-	ModulePanics map[string][]string `msgpack:"mp"`
+	ModulePanics map[string][]string
 	// ModuleChangesHit counts the changed functions hit.
-	ModuleChangesHit int `msgpack:"mh"`
+	ModuleChangesHit int
 	// TestFailure reports if the test failed.
-	TestFailure bool `msgpack:"fail"`
-	// ExtensionData allows extensions to attach custom metadata to test results.
-	// Extensions should use namespaced keys (e.g., "security:capabilities").
-	// Data is preserved across serialization and available during comparison.
-	ExtensionData map[string][]byte `msgpack:"ext,omitempty"`
+	TestFailure bool
 	// ExtensionFrames are filled in if extension AST modifications are configured through ExtensionPointConfig.
-	// Unlike ExtensionData, ExtensionFrames shares the same deduplication pool as CallerResults
-	// for efficient storage. Keys should be namespaced (e.g., "security:network:dial").
-	ExtensionFrames map[string][]CallFrame `msgpack:"ef,omitempty"`
+	// ExtensionFrames shares the same deduplication pool as CallerResults for efficient storage.
+	// Keys should be namespaced (e.g., "security:network:dial").
+	ExtensionFrames map[string][]CallFrame
 }
 
 // structs and code below to encode TestResult into a minimal (de-duplicated) encoding
@@ -181,7 +177,6 @@ type encTestResult struct {
 	ModulePanics     map[string][]string       `msgpack:"mp,omitempty"`
 	ModuleChangesHit int                       `msgpack:"mh"`
 	TestFailure      bool                      `msgpack:"fail"`
-	ExtensionData    map[string][]byte         `msgpack:"ext,omitempty"`
 	ExtensionFrames  map[string][]encCallFrame `msgpack:"ef,omitempty"`
 
 	// ─── our two dictionaries ───
@@ -397,7 +392,6 @@ func (tr *TestResult) marshalMsgpack(enc *msgpack.Encoder, buf *bytes.Buffer) ([
 		ModulePanics:     tr.ModulePanics,
 		ModuleChangesHit: tr.ModuleChangesHit,
 		TestFailure:      tr.TestFailure,
-		ExtensionData:    tr.ExtensionData,
 		ExtensionFrames:  encodeCallFrames(tr.ExtensionFrames),
 		FVDict:           fvDict,
 		FVNodeDict:       fvnDict,
@@ -425,7 +419,6 @@ func (tr *TestResult) UnmarshalMsgpack(data []byte) error {
 	tr.ModulePanics = enc.ModulePanics
 	tr.ModuleChangesHit = enc.ModuleChangesHit
 	tr.TestFailure = enc.TestFailure
-	tr.ExtensionData = enc.ExtensionData
 
 	// Decode CallFrames with dictionary support
 	tr.CallerResults = make(map[string][]CallFrame, len(enc.CallerResults))
