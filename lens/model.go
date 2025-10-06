@@ -146,6 +146,10 @@ type TestResult struct {
 	ModuleChangesHit int `msgpack:"mh"`
 	// TestFailure reports if the test failed.
 	TestFailure bool `msgpack:"fail"`
+	// ExtensionData allows extensions to attach custom metadata to test results.
+	// Extensions should use namespaced keys (e.g., "security:capabilities").
+	// Data is preserved across serialization and available during comparison.
+	ExtensionData map[string][]byte `msgpack:"ext,omitempty"`
 }
 
 // structs and code below to encode TestResult into a minimal (de-duplicated) encoding
@@ -173,6 +177,7 @@ type encTestResult struct {
 	ModulePanics     map[string][]string       `msgpack:"mp,omitempty"`
 	ModuleChangesHit int                       `msgpack:"mh"`
 	TestFailure      bool                      `msgpack:"fail"`
+	ExtensionData    map[string][]byte         `msgpack:"ext,omitempty"`
 
 	// ─── our two dictionaries ───
 	FVDict     []encFieldValues `msgpack:"fh,omitempty"` // for repeated FieldValues maps
@@ -378,6 +383,7 @@ func (tr *TestResult) marshalMsgpack(enc *msgpack.Encoder, buf *bytes.Buffer) ([
 		ModulePanics:     tr.ModulePanics,
 		ModuleChangesHit: tr.ModuleChangesHit,
 		TestFailure:      tr.TestFailure,
+		ExtensionData:    tr.ExtensionData,
 		FVDict:           fvDict,
 		FVNodeDict:       fvnDict,
 		STDict:           stDict,
@@ -404,6 +410,7 @@ func (tr *TestResult) UnmarshalMsgpack(data []byte) error {
 	tr.ModulePanics = enc.ModulePanics
 	tr.ModuleChangesHit = enc.ModuleChangesHit
 	tr.TestFailure = enc.TestFailure
+	tr.ExtensionData = enc.ExtensionData
 
 	// Decode CallFrames with dictionary support
 	tr.CallerResults = make(map[string][]CallFrame, len(enc.CallerResults))

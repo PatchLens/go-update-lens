@@ -422,7 +422,7 @@ func TestFilePathAndIdent(t *testing.T) {
 	require.NotNil(t, fn)
 
 	assert.Equal(t, "foo.go", filePathForSSAFunc(fn))
-	ident, ok := makeSSAFunctionIdent(fn)
+	ident, ok := MakeSSAFunctionIdent(fn)
 	assert.True(t, ok)
 	assert.Equal(t, "foo:F", ident)
 }

@@ -37,7 +37,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 	// Identify any root callgraph.Nodes (package main, func main) to limit calls above the roots
 	rootNodes := make(map[*callgraph.Node]bool)
 	for fn, node := range cg.Nodes {
-		ident, _ := makeSSAFunctionIdent(fn) // ignore supported here, try to capture all
+		ident, _ := MakeSSAFunctionIdent(fn) // ignore supported here, try to capture all
 		cgNodeFunctions[ident] = fn
 		if isMainFunction(fn) || isInitFunction(fn) {
 			rootNodes[node] = true
@@ -74,7 +74,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 					return err
 				}
 
-				ident, supported := makeSSAFunctionIdent(fn)
+				ident, supported := MakeSSAFunctionIdent(fn)
 				if !supported {
 					return nil // don't record functions we can't inject or call into
 				}
@@ -164,7 +164,7 @@ func TestStaticAnalysis(callers []*CallerFunction, projectDir string) ([]*TestFu
 	// Map each CallerFunction to its *ssa.Function for quick lookup
 	cgNodeFunctions := make(map[string][]*ssa.Function)
 	for fn := range cg.Nodes {
-		ident, _ := makeSSAFunctionIdent(fn) // ignore supported for building this map
+		ident, _ := MakeSSAFunctionIdent(fn) // ignore supported for building this map
 		cgNodeFunctions[ident] = append(cgNodeFunctions[ident], fn)
 	}
 	callerSSA := make(map[*ssa.Function]*CallerFunction)
@@ -192,7 +192,7 @@ func TestStaticAnalysis(callers []*CallerFunction, projectDir string) ([]*TestFu
 
 				// we've found a Test function that transitively calls our caller
 				testSSA := end.Func
-				ident, supported := makeSSAFunctionIdent(testSSA)
+				ident, supported := MakeSSAFunctionIdent(testSSA)
 				if !supported {
 					return nil // don't record unsupported functions we can't invoke
 				}
@@ -236,6 +236,13 @@ func TestStaticAnalysis(callers []*CallerFunction, projectDir string) ([]*TestFu
 
 // loadProjectPackageCallGraph loads the project packages and creates an SSA Program and call-graph from the packages.
 func loadProjectPackageCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, error) {
+	cg, _, _, err := LoadProjectCallGraph(projectDir, includeTests)
+	return cg, err
+}
+
+// LoadProjectCallGraph loads the project packages and creates an SSA Program and call-graph.
+// Returns the call graph, SSA program, loaded packages, and any error encountered.
+func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, *ssa.Program, []*packages.Package, error) {
 	cfg := &packages.Config{
 		Dir:   projectDir,
 		Tests: includeTests,
@@ -251,7 +258,7 @@ func loadProjectPackageCallGraph(projectDir string, includeTests bool) (*callgra
 	if FileExists(workPath) {
 		dirs, err := parseGoWork(workPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		for _, d := range dirs {
 			if filepath.IsAbs(d) {
@@ -262,16 +269,16 @@ func loadProjectPackageCallGraph(projectDir string, includeTests bool) (*callgra
 		}
 	}
 	if len(patterns) == 0 {
-		return nil, fmt.Errorf("no go.mod or go.work found in %s", projectDir)
+		return nil, nil, nil, fmt.Errorf("no go.mod or go.work found in %s", projectDir)
 	}
 
 	pkgs, err := packages.Load(cfg, patterns...)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	} else if packages.PrintErrors(pkgs) > 0 {
-		return nil, errors.New("project packages contain errors")
+		return nil, nil, nil, errors.New("project packages contain errors")
 	} else if len(pkgs) == 0 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
 	prog := ssa.NewProgram(pkgs[0].Fset, ssa.GlobalDebug)
@@ -304,7 +311,7 @@ func loadProjectPackageCallGraph(projectDir string, includeTests bool) (*callgra
 	}
 	prog.Build() // build all packages, will be concurrent unless serial flag is passed
 
-	return cha.CallGraph(prog), nil
+	return cha.CallGraph(prog), prog, pkgs, nil
 }
 
 // filePathForSSAFunc attempts to retrieve the file path of the function’s position.
@@ -318,8 +325,9 @@ func filePathForSSAFunc(fn *ssa.Function) string {
 	return pos.Filename
 }
 
-// makeFunctionIdent creates a normalized key for a SSA function, incorporating package and (if any) receiver type.
-func makeSSAFunctionIdent(fn *ssa.Function) (string, bool) {
+// MakeSSAFunctionIdent creates a normalized key for a SSA function, incorporating package and (if any) receiver type.
+// Returns the function identifier string and a boolean indicating if it was successfully extracted from AST.
+func MakeSSAFunctionIdent(fn *ssa.Function) (string, bool) {
 	if fn == nil {
 		return "", false
 	}

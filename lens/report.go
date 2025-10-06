@@ -22,13 +22,14 @@ var redTextColor = charts.ColorRed.WithAdjustHSL(0, .1, -.1)
 
 // ReportMetrics contains run and validation metrics.
 type ReportMetrics struct {
-	GeneratedAt        time.Time         `json:"generated_at"`
-	RunDuration        int64             `json:"run_duration_ms"`
-	AnalysisDuration   int64             `json:"analysis_duration_ms"`
-	FieldCheckDuration int64             `json:"field_check_duration_ms"`
-	MutationDuration   int64             `json:"mutation_duration_ms"`
-	Module             ModuleMetrics     `json:"module"`
-	Validation         ValidationMetrics `json:"validation"`
+	GeneratedAt           time.Time         `json:"generated_at"`
+	RunDuration           int64             `json:"run_ms"`
+	AnalysisDuration      int64             `json:"analysis_ms"`
+	TestDiscoveryDuration int64             `json:"test_discovery_ms"`
+	FieldCheckDuration    int64             `json:"field_check_ms"`
+	MutationDuration      int64             `json:"mutation_ms"`
+	Module                ModuleMetrics     `json:"module"`
+	Validation            ValidationMetrics `json:"validation"`
 }
 
 // ModuleMetrics summarizes module change statistics.
@@ -97,36 +98,49 @@ type TestReport struct {
 	TestRegressionCount int
 	SameFieldCount      int
 	DiffFieldCount      int
+	// ExtensionDataDiff contains differences in extension data between pre/post update.
+	// Key is the extension namespace (e.g., "security"), value is a human-readable diff summary.
+	// Extensions can provide custom diff logic via DefaultTestResultAnalyzer.ExtensionDataAnalyzer.
+	ExtensionDataDiff map[string]string
 }
 
-// WriteReportFiles writes JSON and chart report files.
-func WriteReportFiles(jsonPath, chartPath string,
-	startTime time.Time, analysisDuration, testExpansionDuration, fieldCheckDuration, mutationDuration time.Duration,
-	changedModules []ModuleChange, checkedModules []string,
-	moduleChangeFuncCount, moduleChangesReachedInTesting int,
-	projectFieldChecks int, projectCallingFunctions []*CallerFunction,
-	relevantTestFunctions []*TestFunction, testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
-	syntheticTestFuncCount int,
-	globalMutations MutationResult) error {
-	// Prepare final remaining values for report
-	relevantProjectFunctionIdents := make(map[string]bool, len(projectCallingFunctions))
-	reachableModuleFunctionsIdents := make(map[string]bool, moduleChangeFuncCount)
+// ReportMap represents a report as an extensible map structure.
+// Custom implementations can add additional fields before writing to JSON.
+type ReportMap map[string]interface{}
+
+// PrepareReportData prepares all the data needed for report generation.
+func PrepareReportData(changedModules []ModuleChange, projectCallingFunctions []*CallerFunction,
+	relevantTestFunctions []*TestFunction, testResults []TestReport,
+	moduleChangeFuncCount int) (reachableModuleFunctionsIdents []string,
+	relevantProjectFunctionIdents []string, relevantTestFunctionsIdents []string,
+	performanceChanges []PerformanceChange, testDetails []TestDetail,
+	rootM ModuleChange, syntheticTestFuncCount int) {
+	// Prepare relevant function identifiers
+	relevantProjectFunctionMap := make(map[string]bool, len(projectCallingFunctions))
+	reachableModuleFunctionMap := make(map[string]bool, moduleChangeFuncCount)
 	for _, f := range projectCallingFunctions {
 		for _, change := range f.ChangeFunctions {
-			reachableModuleFunctionsIdents[change.FunctionIdent] = true
+			reachableModuleFunctionMap[change.FunctionIdent] = true
 		}
-		relevantProjectFunctionIdents[f.FunctionIdent] = true
+		relevantProjectFunctionMap[f.FunctionIdent] = true
 	}
-	relevantTestFunctionsIdents := make([]string, len(relevantTestFunctions))
+
+	relevantProjectFunctionIdents = slices.Collect(maps.Keys(relevantProjectFunctionMap))
+	reachableModuleFunctionsIdents = slices.Collect(maps.Keys(reachableModuleFunctionMap))
+
+	relevantTestFunctionsIdents = make([]string, len(relevantTestFunctions))
 	for i := range relevantTestFunctions {
 		relevantTestFunctionsIdents[i] = relevantTestFunctions[i].FunctionIdent
+		if strings.HasPrefix(relevantTestFunctions[i].FunctionName, GeneratedTestFunctionPrefix) {
+			syntheticTestFuncCount++
+		}
 	}
 	slices.SortFunc(testResults, func(a, b TestReport) int { // keep consistent order in report
 		return strings.Compare(a.OriginalResult.TestFunction.FunctionIdent, b.OriginalResult.TestFunction.FunctionIdent)
 	})
 
 	// build per-test metrics
-	testDetails := make([]TestDetail, len(testResults))
+	testDetails = make([]TestDetail, len(testResults))
 	for i, tr := range testResults {
 		// ensure field changes are minimized
 		for k1, v1 := range tr.CallerFieldChanges {
@@ -143,20 +157,13 @@ func WriteReportFiles(jsonPath, chartPath string,
 			ModuleChangeHitCount: tr.OriginalResult.ModuleChangesHit,
 			FieldChanges:         tr.CallerFieldChanges,
 		}
-	}
 
-	rootM := rootModule(changedModules) // call out the root module change (if only one root)
-
-	// Build performance changes array
-	var performanceChanges []PerformanceChange
-	for _, tr := range testResults {
+		// Collect performance changes
 		if len(tr.CallerTimeChanges) > 0 {
-			testIdent := tr.OriginalResult.TestFunction.FunctionIdent
-			testName := tr.OriginalResult.TestFunction.FunctionName
 			for callerIdent, timeChange := range tr.CallerTimeChanges {
 				performanceChanges = append(performanceChanges, PerformanceChange{
-					TestFunctionIdent: testIdent,
-					TestFunctionName:  testName,
+					TestFunctionIdent: tr.OriginalResult.TestFunction.FunctionIdent,
+					TestFunctionName:  tr.OriginalResult.TestFunction.FunctionName,
 					CallerIdent:       callerIdent,
 					TimeDiffMs:        timeChange.TimeDiff.Milliseconds(),
 					PreTimeMs:         timeChange.PreTimeMs,
@@ -166,24 +173,8 @@ func WriteReportFiles(jsonPath, chartPath string,
 		}
 	}
 
-	err := writeReportJSON(jsonPath, startTime, analysisDuration, fieldCheckDuration, mutationDuration,
-		rootM.Name, rootM.PriorVersion, rootM.NewVersion,
-		checkedModules, moduleChangeFuncCount, moduleChangesReachedInTesting,
-		slices.Collect(maps.Keys(reachableModuleFunctionsIdents)),
-		slices.Collect(maps.Keys(relevantProjectFunctionIdents)),
-		projectFieldChecks, relevantTestFunctionsIdents, testFieldSameCount, testFieldDiffCount,
-		syntheticTestFuncCount, globalMutations, performanceChanges, testDetails)
-	if err != nil {
-		return err
-	}
-
-	err = writeReportCharts(chartPath, rootM.Name, rootM.PriorVersion, rootM.NewVersion,
-		moduleChangeFuncCount, len(reachableModuleFunctionsIdents), moduleChangesReachedInTesting,
-		testFieldSameCount, testFieldDiffCount, testResults, globalMutations)
-	if err != nil {
-		return err
-	}
-	return nil
+	rootM = rootModule(changedModules)
+	return
 }
 
 func rootModule(changedModules []ModuleChange) ModuleChange {
@@ -203,23 +194,23 @@ func rootModule(changedModules []ModuleChange) ModuleChange {
 	return directModule
 }
 
-func writeReportJSON(path string, startTime time.Time, analysisDuration, fieldCheckDuration, mutationDuration time.Duration,
+// BuildReportMap creates the report as a ReportMap that can be extended
+// by custom implementations before writing to JSON.
+func BuildReportMap(startTime time.Time,
+	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
 	moduleName, startVersion, changeVersion string,
 	checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
 	reachableModuleFunctionsIdents, relevantProjectFunctionIdents []string,
 	projectFieldChecks int,
 	relevantTestFunctionsIdents []string, testFieldSameCount, testFieldDiffCount, syntheticTestFuncCount int,
-	globalMutations MutationResult, performanceChanges []PerformanceChange, testDetails []TestDetail) error {
-	if path == "" {
-		return nil
-	}
-
+	globalMutations MutationResult, performanceChanges []PerformanceChange, testDetails []TestDetail) (ReportMap, error) {
 	report := ReportMetrics{
-		GeneratedAt:        startTime,
-		RunDuration:        time.Since(startTime).Milliseconds(),
-		AnalysisDuration:   analysisDuration.Milliseconds(),
-		FieldCheckDuration: fieldCheckDuration.Milliseconds(),
-		MutationDuration:   mutationDuration.Milliseconds(),
+		GeneratedAt:           startTime,
+		RunDuration:           time.Since(startTime).Milliseconds(),
+		AnalysisDuration:      analysisDuration.Milliseconds(),
+		TestDiscoveryDuration: testDiscoveryDuration.Milliseconds(),
+		FieldCheckDuration:    fieldCheckDuration.Milliseconds(),
+		MutationDuration:      mutationDuration.Milliseconds(),
 		Module: ModuleMetrics{
 			RootModuleName:            moduleName,
 			RootModuleStartVersion:    startVersion,
@@ -247,12 +238,58 @@ func writeReportJSON(path string, startTime time.Time, analysisDuration, fieldCh
 		},
 	}
 
-	if encodedReport, err := json.MarshalIndent(report, "", "  "); err != nil {
-		return fmt.Errorf("marshal report json failed: %w", err)
-	} else if err := os.WriteFile(path, encodedReport, 0644); err != nil {
+	// Convert struct to map for extensibility
+	reportBytes, err := json.Marshal(report)
+	if err != nil {
+		return nil, fmt.Errorf("marshal report to bytes failed: %w", err)
+	}
+
+	var reportMap ReportMap
+	if err := json.Unmarshal(reportBytes, &reportMap); err != nil {
+		return nil, fmt.Errorf("unmarshal report to map failed: %w", err)
+	}
+
+	return reportMap, nil
+}
+
+// WriteToFile writes the report map to a JSON file.
+// This method allows custom implementations to write extended reports.
+func (rm ReportMap) WriteToFile(path string) error {
+	if path == "" {
+		return nil
+	}
+
+	encodedReport, err := json.MarshalIndent(rm, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal report map failed: %w", err)
+	}
+	if err := os.WriteFile(path, encodedReport, 0644); err != nil {
 		return fmt.Errorf("write report file failed: %w", err)
 	}
 	return nil
+}
+
+func writeReportJSON(path string, startTime time.Time,
+	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
+	moduleName, startVersion, changeVersion string,
+	checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
+	reachableModuleFunctionsIdents, relevantProjectFunctionIdents []string,
+	projectFieldChecks int,
+	relevantTestFunctionsIdents []string, testFieldSameCount, testFieldDiffCount, syntheticTestFuncCount int,
+	globalMutations MutationResult, performanceChanges []PerformanceChange, testDetails []TestDetail) error {
+	// Build the report map
+	reportMap, err := BuildReportMap(startTime,
+		analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration,
+		moduleName, startVersion, changeVersion, checkedModules, moduleChangeFuncCount,
+		moduleChangesReachedInTesting, reachableModuleFunctionsIdents, relevantProjectFunctionIdents,
+		projectFieldChecks, relevantTestFunctionsIdents, testFieldSameCount, testFieldDiffCount,
+		syntheticTestFuncCount, globalMutations, performanceChanges, testDetails)
+	if err != nil {
+		return err
+	}
+
+	// Write the map to file
+	return reportMap.WriteToFile(path)
 }
 
 // RenderReportChartsFromJson takes a ReportMetrics and renders the report to a png.

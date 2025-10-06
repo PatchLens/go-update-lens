@@ -326,7 +326,7 @@ func Foo() {
 			file := filepath.Join(dir, "main.go")
 			require.NoError(t, os.WriteFile(file, []byte(tc.src), 0644))
 
-			mod := &astModifier{}
+			mod := &ASTModifier{}
 			err := mod.InsertFuncLines(&Function{
 				FilePath:      file,
 				PackageName:   "main",

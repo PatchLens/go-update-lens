@@ -73,7 +73,7 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 	mutationFunctions := make([]string, 0, len(moduleChanges))
 	if lineScopedMutations {
 		// Disable mutation on unchanged lines by inserting the go-mutesting directive
-		astEditor := &astModifier{}
+		astEditor := &ASTModifier{}
 		defer func() {
 			errs := astEditor.Restore(GoEnv(gopath, gomodcache))
 			if len(errs) > 0 {

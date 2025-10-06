@@ -233,7 +233,7 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 }
 
 func loadModulePackageFromCache(gomodcache, modName, version string) (string, []*packages.Package, error) {
-	dir, err := findModulePathInCache(gomodcache, modName, version)
+	dir, err := FindModulePathInCache(gomodcache, modName, version)
 	if err != nil {
 		return dir, nil, err
 	}
@@ -250,8 +250,9 @@ func loadModulePackageFromCache(gomodcache, modName, version string) (string, []
 	return dir, pkgs, nil
 }
 
-// findModulePathInCache attempts to locate module@version in the local module cache.
-func findModulePathInCache(gomodcache, modPath, version string) (string, error) {
+// FindModulePathInCache attempts to locate a module@version in the local module cache.
+// Returns the filesystem directory where the module source is located.
+func FindModulePathInCache(gomodcache, modPath, version string) (string, error) {
 	// Attempt to form the actual cache directory name. The local module cache
 	// structure is typically: GOPATH/pkg/mod/<escaped module>@<version>.
 	escapedMod, err := module.EscapePath(modPath)

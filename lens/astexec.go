@@ -151,7 +151,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	srvChan chan *astServer, goroot, projectDir string, stableResultsStorage Storage, storage Storage,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, error) {
-	astEditor := &astModifier{}
+	astEditor := &ASTModifier{}
 	defer func() {
 		errs := astEditor.Restore(env)
 		if len(errs) > 0 {
@@ -250,7 +250,7 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	return totalFieldCheckCount, len(moduleIdentsReached), err
 }
 
-func injectMonitorPoints(astEditor *astModifier, maxVariableRecurse, maxFieldLen int,
+func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen int,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction) (
 	map[int]*string, map[int]*string, map[int]*string, map[int]*string, error) {
 	pointIdLock := sync.Mutex{}
@@ -523,7 +523,9 @@ func debugLogMonitorStack(pointId int, stack []LensMonitorStackFrame) {
 	}
 }
 
-func stackFramesKey(bb *bytes.Buffer, frames []StackFrame) string {
+// StackFramesKey creates a unique key from stack frames for frame matching.
+// This is used to match call frames across pre/post update executions.
+func StackFramesKey(bb *bytes.Buffer, frames []StackFrame) string {
 	bb.Reset()
 	for _, sf := range frames {
 		// don't use sf.ID(), it's possible for line numbers to change dependent on the AST rewrites
@@ -571,7 +573,9 @@ func trimStackFile(projectDir, goroot, file string) string {
 	return file
 }
 
-func projectFrames(frames []StackFrame) []StackFrame {
+// ProjectFrames filters a stack to only include frames from project code.
+// It excludes frames from vendor, stdlib, and external modules.
+func ProjectFrames(frames []StackFrame) []StackFrame {
 	return bulk.SliceFilter(func(sf StackFrame) bool {
 		// match the relative path prefix from trimStackFile
 		return strings.HasPrefix(sf.File, "./") && !strings.HasPrefix(sf.File, "./vendor/")
@@ -647,12 +651,12 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 					delete(fieldMap, k)
 				}
 			} else {
-				pStack := projectFrames(stack)
-				pKey := stackFramesKey(&bb, pStack)
+				pStack := ProjectFrames(stack)
+				pKey := StackFramesKey(&bb, pStack)
 
 				var targetOccur int
 				for _, cf := range t.callerFrames[callerIdentStr] {
-					if stackFramesKey(&bb, projectFrames(cf.Stack)) == pKey {
+					if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
 						targetOccur++
 					}
 				}
@@ -660,7 +664,7 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 				idx := -1
 				var occ int
 				for i := range frames {
-					if stackFramesKey(&bb, projectFrames(frames[i].Stack)) == pKey {
+					if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
 						if occ == targetOccur {
 							idx = i
 							break
@@ -793,13 +797,13 @@ func testResultStableFields(r1, r2 TestResult) TestResult {
 		slices.SortStableFunc(frames2, callFrameSortFunc)
 
 		frames2ByKey := bulk.SliceToGroupsBy(func(f CallFrame) string {
-			return stackFramesKey(&bb, projectFrames(f.Stack))
+			return StackFramesKey(&bb, ProjectFrames(f.Stack))
 		}, frames2)
 
 		used := make(map[string]int, len(frames1))
 		commonFrames := make([]CallFrame, 0, len(frames1))
 		for _, frame1 := range frames1 {
-			key := stackFramesKey(&bb, projectFrames(frame1.Stack))
+			key := StackFramesKey(&bb, ProjectFrames(frame1.Stack))
 			idx := used[key]
 			used[key] = idx + 1
 			if idx >= len(frames2ByKey[key]) {

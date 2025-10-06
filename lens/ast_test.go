@@ -55,8 +55,8 @@ func TestASTEndToEnd(t *testing.T) {
 	}
 
 	// singleReturnInjector helps implement our test case function to match other injection functions
-	singleReturnInjectorFactory := func(f func(m *astModifier, fn *Function) (int, error)) func(m *astModifier, fn *Function) ([]int, error) {
-		return func(m *astModifier, fn *Function) ([]int, error) {
+	singleReturnInjectorFactory := func(f func(m *ASTModifier, fn *Function) (int, error)) func(m *ASTModifier, fn *Function) ([]int, error) {
+		return func(m *ASTModifier, fn *Function) ([]int, error) {
 			id, err := f(m, fn)
 			if err != nil {
 				return nil, err
@@ -69,7 +69,7 @@ func TestASTEndToEnd(t *testing.T) {
 		name                string
 		fnName              string
 		src                 string
-		inject              func(m *astModifier, fn *Function) ([]int, error)
+		inject              func(m *ASTModifier, fn *Function) ([]int, error)
 		expectedPoints      int
 		expectedStatePoints int
 		expectedPanicPoints int
@@ -84,7 +84,7 @@ func TestASTEndToEnd(t *testing.T) {
 func main() {
 	SendLensPointMessage(-1)
 }`,
-			inject: func(m *astModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
 				return nil, nil // no-op
 			},
 			expectedPoints: 1,
@@ -108,7 +108,7 @@ func TargetEntry() {
 func main() {
 	TargetEntry()
 }`,
-			inject:         singleReturnInjectorFactory((*astModifier).InjectFuncPointEntry),
+			inject:         singleReturnInjectorFactory((*ASTModifier).InjectFuncPointEntry),
 			expectedPoints: 1,
 			pointValidator: func(t *testing.T, points []LensMonitorMessagePoint) {
 				p := points[0]
@@ -126,7 +126,7 @@ func main() {
 			src: `package main
 func TargetFinish() {}
 func main(){ TargetFinish() }`,
-			inject:         singleReturnInjectorFactory((*astModifier).InjectFuncPointFinish),
+			inject:         singleReturnInjectorFactory((*ASTModifier).InjectFuncPointFinish),
 			expectedPoints: 1,
 		},
 		{
@@ -135,7 +135,7 @@ func main(){ TargetFinish() }`,
 			src: `package main
 func TargetBoth() {}
 func main(){ TargetBoth() }`,
-			inject: func(m *astModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
 				if id1, err := m.InjectFuncPointEntry(fn); err != nil {
 					return nil, err
 				} else if id2, err := m.InjectFuncPointFinish(fn); err != nil {
@@ -152,7 +152,7 @@ func main(){ TargetBoth() }`,
 			src: `package main
 func TargetFinish() {}
 func main(){ TargetFinish() }`,
-			inject: singleReturnInjectorFactory((*astModifier).InjectFuncPointPanic),
+			inject: singleReturnInjectorFactory((*ASTModifier).InjectFuncPointPanic),
 			// no points expected
 		},
 		{
@@ -161,7 +161,7 @@ func main(){ TargetFinish() }`,
 			src: `package main
 func TargetFinish() { panic("expected") }
 func main(){ TargetFinish() }`,
-			inject:              singleReturnInjectorFactory((*astModifier).InjectFuncPointPanic),
+			inject:              singleReturnInjectorFactory((*ASTModifier).InjectFuncPointPanic),
 			expectedPanicPoints: 1,
 			panicPointValidator: func(t *testing.T, panics []LensMonitorMessagePointPanic) {
 				assert.Positive(t, panics[0].TimeNS)
@@ -174,7 +174,7 @@ func main(){ TargetFinish() }`,
 			src: `package main
 func TargetState() { }
 func main() { TargetState() }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -204,7 +204,7 @@ func TargetState(a, b int) int {
 func main() {
 	_ = TargetState(1, 2)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -238,7 +238,7 @@ func TargetState(a, b int) (result int) {
 func main() {
 	_ = TargetState(-1, 1)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -271,7 +271,7 @@ func TargetState(a int) (int, int) {
 func main() {
 	_, _ = TargetState(1)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -304,7 +304,7 @@ func TargetState(a int) (int, int) {
 func main() {
 	_, _ = TargetState(1)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -336,7 +336,7 @@ func TargetState(a int) interface{} {
 func main() {
 	_ = TargetState(1)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -361,7 +361,7 @@ func TargetState() interface{} {
 func main() {
        _ = TargetState()
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -388,7 +388,7 @@ func TargetState() interface{} {
 func main() {
        _ = TargetState()
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -409,7 +409,7 @@ func TargetState() interface{} {
 func main() {
        _ = TargetState()
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -432,7 +432,7 @@ func TargetState[T any](a T) T {
 func main() {
 	_ = TargetState[int](2)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -456,7 +456,7 @@ func TargetState() int {
 func main() {
 	_ = TargetState()
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -477,7 +477,7 @@ func TargetState(a MyInt) int {
 func main() {
 	_ = TargetState(3)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				p := points[0]
@@ -504,7 +504,7 @@ func TargetState(a int) int {
 func main() {
 	_ = TargetState(1)
 }`,
-			inject:              (*astModifier).InjectFuncPointReturnStates,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 5,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
 				for i, p := range points {
@@ -536,7 +536,7 @@ func main() {
 			src: `package main
 func Generic[T any](v T) T { return v }
 func main() { _ = Generic(1) }`,
-			inject: func(m *astModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
 				id1, err := m.InjectFuncPointEntry(fn)
 				if err != nil {
 					return nil, err
@@ -561,7 +561,7 @@ func main() { _ = Generic(1) }`,
 type Box[T any] struct{ v T }
 func (b Box[T]) Get() T { return b.v }
 func main() { b := Box[int]{v: 2}; _ = b.Get() }`,
-			inject: func(m *astModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
 				id1, err := m.InjectFuncPointEntry(fn)
 				if err != nil {
 					return nil, err
@@ -587,7 +587,7 @@ func main() { b := Box[int]{v: 2}; _ = b.Get() }`,
 type Box[T any] struct{ v T }
 func (b *Box[T]) Set(v T) T { old := b.v; b.v = v; return old }
 func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
-			inject: func(m *astModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
 				id1, err := m.InjectFuncPointEntry(fn)
 				if err != nil {
 					return nil, err
@@ -625,7 +625,7 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 			port := freePort(t)
 
 			// inject the client and test injection points
-			mod := &astModifier{}
+			mod := &ASTModifier{}
 			err = mod.InjectASTClient(tmp, port, 5, 256)
 			require.NoError(t, err)
 			ident := tc.fnIdent

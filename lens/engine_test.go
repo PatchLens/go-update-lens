@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Mock implementations for testing
 type mockModuleChangeProvider struct {
 	moduleChanges []*ModuleFunction
 	checkedNames  []string
@@ -81,10 +80,10 @@ type mockReportWriter struct {
 }
 
 func (m *mockReportWriter) WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
-	analysisTime, testExpansionTime, testExecutionTime, mutationTime time.Duration,
+	analysisTime, testDiscoveryTime, testExecutionTime, mutationTime time.Duration,
 	changedModules []ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
 	projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	sameCount, diffCount int, testReports []TestReport, performanceRegressionCount int,
+	sameCount, diffCount int, testReports []TestReport,
 	globalMutations MutationResult) error {
 	return m.err
 }
@@ -96,15 +95,6 @@ type mockTestResultAnalyzer struct {
 
 func (m *mockTestResultAnalyzer) CompareTestResults(preStorage, postStorage Storage, timeMultiplier int) (int, int, []TestReport, error) {
 	return m.sameCount, m.diffCount, m.testReports, nil
-}
-
-type mockStorageProvider struct {
-	storage Storage
-	err     error
-}
-
-func (m *mockStorageProvider) NewStorage() (Storage, error) {
-	return m.storage, m.err
 }
 
 func createTestConfig(t *testing.T) *Config {
@@ -191,9 +181,7 @@ func TestAnalysisEngine_Run(t *testing.T) {
 				diffCount:   0,
 				testReports: []TestReport{},
 			},
-			&mockStorageProvider{
-				storage: NewMemStorage(),
-			},
+			&SingletonStorageProvider{Store: NewMemStorage()},
 			&mockReportWriter{},
 		)
 
@@ -956,7 +944,6 @@ func TestParseTargetModule(t *testing.T) {
 	})
 }
 
-// Fuzzing tests for module parsing validation
 func FuzzParseTargetModule(f *testing.F) {
 	// Seed with valid test cases
 	f.Add("github.com/test/module@v1.0.0")
@@ -1077,6 +1064,8 @@ func FuzzConfigPrepareModuleValidation(f *testing.F) {
 }
 
 func TestDefaultTestResultAnalyzer_DiffValues(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		v1            string
@@ -1085,114 +1074,114 @@ func TestDefaultTestResultAnalyzer_DiffValues(t *testing.T) {
 		isUnifiedDiff bool
 	}{
 		{
-			name:     "identical values",
+			name:     "identical_values",
 			v1:       "same value",
 			v2:       "same value",
 			expected: "",
 		},
 		{
-			name:     "both hashed values",
+			name:     "both_hashed_values",
 			v1:       HashFieldValuePrefix + "abc123",
 			v2:       HashFieldValuePrefix + "def456",
 			expected: "<VALUE TOO LARGE ...c123> != <VALUE TOO LARGE ...f456>",
 		},
 		{
-			name:     "first value hashed",
+			name:     "first_value_hashed",
 			v1:       HashFieldValuePrefix + "abc123",
 			v2:       "normal value",
 			expected: "<VALUE TOO LARGE ...c123> != \"normal value\"",
 		},
 		{
-			name:     "second value hashed",
+			name:     "second_value_hashed",
 			v1:       "normal value",
 			v2:       HashFieldValuePrefix + "abc123",
 			expected: "\"normal value\" != <VALUE TOO LARGE ...c123>",
 		},
 		{
-			name:          "simple string diff",
+			name:          "simple_string_diff",
 			v1:            "hello",
 			v2:            "world",
 			expected:      "@@ -1 +1 @@\n-hello\n+world\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "multiline diff",
+			name:          "multiline_diff",
 			v1:            "line1\nline2\nline3",
 			v2:            "line1\nmodified\nline3",
 			expected:      "@@ -1,3 +1,3 @@\n line1\n-line2\n+modified\n line3\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "empty string to non-empty",
+			name:          "empty_string_non-empty",
 			v1:            "",
 			v2:            "not empty",
 			expected:      "@@ -1 +1 @@\n-\n+not empty\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "non-empty to empty string",
+			name:          "non-empty_empty_string",
 			v1:            "not empty",
 			v2:            "",
 			expected:      "@@ -1 +1 @@\n-not empty\n+\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:     "both empty strings",
+			name:     "empty_strings",
 			v1:       "",
 			v2:       "",
 			expected: "",
 		},
 		{
-			name:          "whitespace differences",
+			name:          "whitespace_differences",
 			v1:            "hello world",
 			v2:            "hello  world",
 			expected:      "@@ -1 +1 @@\n-hello world\n+hello  world\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "newline differences",
+			name:          "newline_differences",
 			v1:            "hello\nworld",
 			v2:            "hello\r\nworld",
 			expected:      "@@ -1,2 +1,2 @@\n-hello\n+hello\r\n world\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "json structure diff",
+			name:          "json_structure_diff",
 			v1:            `{"key": "value1", "other": "same"}`,
 			v2:            `{"key": "value2", "other": "same"}`,
 			expected:      "@@ -1 +1 @@\n-{\"key\": \"value1\", \"other\": \"same\"}\n+{\"key\": \"value2\", \"other\": \"same\"}\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "very long single line",
+			name:          "long_single_line",
 			v1:            strings.Repeat("a", 100),
 			v2:            strings.Repeat("b", 100),
 			expected:      "@@ -1 +1 @@\n-" + strings.Repeat("a", 100) + "\n+" + strings.Repeat("b", 100) + "\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "partial hash prefix match v1",
+			name:          "partial_hash_prefix_match_1",
 			v1:            "vsha1",
 			v2:            "something",
 			expected:      "@@ -1 +1 @@\n-vsha1\n+something\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "partial hash prefix match v2",
+			name:          "partial_hash_prefix_match_2",
 			v1:            "something",
 			v2:            "vsha1",
 			expected:      "@@ -1 +1 @@\n-something\n+vsha1\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "lines with only spaces",
+			name:          "lines_with_only_spaces",
 			v1:            "line1\n   \nline3",
 			v2:            "line1\n\nline3",
 			expected:      "@@ -1,3 +1,3 @@\n line1\n-   \n+\n line3\n",
 			isUnifiedDiff: true,
 		},
 		{
-			name:          "tab vs spaces",
+			name:          "tab_vs_spaces",
 			v1:            "hello\tworld",
 			v2:            "hello world",
 			expected:      "@@ -1 +1 @@\n-hello\tworld\n+hello world\n",
@@ -1204,8 +1193,6 @@ func TestDefaultTestResultAnalyzer_DiffValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
 			result := analyzer.DiffValues(tt.v1, tt.v2)
 
 			if tt.isUnifiedDiff {
@@ -1277,4 +1264,241 @@ func FuzzConfigPrepareModulesValidation(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestExtensionDataDefaultComparison(t *testing.T) {
+	t.Parallel()
+
+	// Test default byte-level comparison
+	preData := map[string][]byte{
+		"security": []byte("low"),
+	}
+	postData := map[string][]byte{
+		"security": []byte("high"),
+	}
+
+	// Use default analyzer
+	analyzer := &DefaultTestResultAnalyzer{}
+
+	preStorage := NewMemStorage()
+	_ = preStorage.SaveState("test", createTestResultWithExtensionData(t, "test", preData))
+	postStorage := NewMemStorage()
+	_ = postStorage.SaveState("test", createTestResultWithExtensionData(t, "test", postData))
+
+	_, _, reports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
+	require.NoError(t, err)
+	require.Len(t, reports, 1)
+
+	// Verify extension data diff was captured with default byte comparison
+	assert.NotNil(t, reports[0].ExtensionDataDiff)
+	assert.Contains(t, reports[0].ExtensionDataDiff, "security")
+	assert.Contains(t, reports[0].ExtensionDataDiff["security"], "Changed")
+}
+
+func TestExtensionDataCustomAnalyzer(t *testing.T) {
+	t.Parallel()
+
+	// Create analyzer with custom ExtensionDataAnalyzer function
+	customCalled := false
+	analyzer := &DefaultTestResultAnalyzer{
+		ExtensionDataAnalyzer: func(preData, postData map[string][]byte) map[string]string {
+			customCalled = true
+			diff := make(map[string]string)
+			for ns := range preData {
+				if postData[ns] != nil {
+					// Custom semantic comparison
+					diff[ns] = "Custom: security level changed from low to high"
+				}
+			}
+			return diff
+		},
+	}
+
+	preData := map[string][]byte{
+		"security": []byte(`{"level":"low"}`),
+	}
+	postData := map[string][]byte{
+		"security": []byte(`{"level":"high"}`),
+	}
+
+	preStorage := NewMemStorage()
+	_ = preStorage.SaveState("test", createTestResultWithExtensionData(t, "test", preData))
+	postStorage := NewMemStorage()
+	_ = postStorage.SaveState("test", createTestResultWithExtensionData(t, "test", postData))
+
+	_, _, reports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
+	require.NoError(t, err)
+	require.Len(t, reports, 1)
+
+	// Verify custom analyzer was called
+	assert.True(t, customCalled, "Custom ExtensionDataAnalyzer should have been called")
+	assert.NotNil(t, reports[0].ExtensionDataDiff)
+	assert.Contains(t, reports[0].ExtensionDataDiff, "security")
+	assert.Equal(t, "Custom: security level changed from low to high", reports[0].ExtensionDataDiff["security"])
+}
+
+func TestExtensionDataMultipleNamespaces(t *testing.T) {
+	t.Parallel()
+
+	preData := map[string][]byte{
+		"security":    []byte("level1"),
+		"performance": []byte("fast"),
+		"metadata":    []byte("v1"),
+	}
+	postData := map[string][]byte{
+		"security":    []byte("level2"), // Changed
+		"performance": []byte("fast"),   // Same
+		"metadata":    []byte("v2"),     // Changed
+		"newfield":    []byte("added"),  // Added
+	}
+
+	analyzer := &DefaultTestResultAnalyzer{}
+
+	preStorage := NewMemStorage()
+	_ = preStorage.SaveState("test", createTestResultWithExtensionData(t, "test", preData))
+	postStorage := NewMemStorage()
+	_ = postStorage.SaveState("test", createTestResultWithExtensionData(t, "test", postData))
+
+	_, _, reports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
+	require.NoError(t, err)
+	require.Len(t, reports, 1)
+
+	diff := reports[0].ExtensionDataDiff
+	assert.NotNil(t, diff)
+
+	// Changed fields should be present
+	assert.Contains(t, diff, "security")
+	assert.Contains(t, diff, "metadata")
+	assert.Contains(t, diff, "newfield")
+
+	// Unchanged field should not be in diff
+	assert.NotContains(t, diff, "performance")
+
+	// Verify specific diff messages
+	assert.Contains(t, diff["security"], "Changed")
+	assert.Contains(t, diff["newfield"], "Added")
+}
+
+func TestExtensionDataSerialization(t *testing.T) {
+	t.Parallel()
+
+	// Test that ExtensionData survives serialization round-trip
+	originalData := map[string][]byte{
+		"security": []byte("sensitive-data"),
+		"metrics":  []byte(`{"count":42,"status":"ok"}`),
+	}
+
+	result := TestResult{
+		TestFunction: MinimumTestFunction{
+			FunctionIdent: "TestExample",
+			FunctionName:  "TestExample",
+		},
+		ExtensionData: originalData,
+	}
+
+	// Serialize
+	data, err := result.MarshalMsgpack()
+	require.NoError(t, err)
+
+	// Deserialize
+	var decoded TestResult
+	err = decoded.UnmarshalMsgpack(data)
+	require.NoError(t, err)
+
+	// Verify ExtensionData survived round-trip
+	assert.Equal(t, originalData, decoded.ExtensionData)
+	assert.Equal(t, "sensitive-data", string(decoded.ExtensionData["security"]))
+	assert.JSONEq(t, `{"count":42,"status":"ok"}`, string(decoded.ExtensionData["metrics"]))
+}
+
+func TestCompareTestResultExtensionData(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no extension data", func(t *testing.T) {
+		result := compareTestResultExtensionData(nil, nil)
+		assert.Nil(t, result)
+	})
+
+	t.Run("data added", func(t *testing.T) {
+		preData := map[string][]byte{}
+		postData := map[string][]byte{
+			"security": []byte("new-data"),
+		}
+		result := compareTestResultExtensionData(preData, postData)
+		assert.NotNil(t, result)
+		assert.Contains(t, result, "security")
+		assert.Contains(t, result["security"], "Added")
+		assert.Contains(t, result["security"], "8 bytes")
+	})
+
+	t.Run("data removed", func(t *testing.T) {
+		preData := map[string][]byte{
+			"security": []byte("old-data"),
+		}
+		postData := map[string][]byte{}
+		result := compareTestResultExtensionData(preData, postData)
+		assert.NotNil(t, result)
+		assert.Contains(t, result, "security")
+		assert.Contains(t, result["security"], "Removed")
+	})
+
+	t.Run("data changed", func(t *testing.T) {
+		preData := map[string][]byte{
+			"security": []byte("old"),
+		}
+		postData := map[string][]byte{
+			"security": []byte("new-value"),
+		}
+		result := compareTestResultExtensionData(preData, postData)
+		assert.NotNil(t, result)
+		assert.Contains(t, result, "security")
+		assert.Contains(t, result["security"], "Changed")
+		assert.Contains(t, result["security"], "3 -> 9 bytes")
+	})
+
+	t.Run("data unchanged", func(t *testing.T) {
+		preData := map[string][]byte{
+			"security": []byte("same"),
+		}
+		postData := map[string][]byte{
+			"security": []byte("same"),
+		}
+		result := compareTestResultExtensionData(preData, postData)
+		assert.Nil(t, result) // No diff when data is same
+	})
+
+	t.Run("multiple namespaces", func(t *testing.T) {
+		preData := map[string][]byte{
+			"security":  []byte("v1"),
+			"metrics":   []byte("old"),
+			"unchanged": []byte("same"),
+		}
+		postData := map[string][]byte{
+			"security":  []byte("v2"),
+			"metrics":   []byte("new"),
+			"unchanged": []byte("same"),
+			"added":     []byte("data"),
+		}
+		result := compareTestResultExtensionData(preData, postData)
+		assert.NotNil(t, result)
+		assert.Contains(t, result, "security")
+		assert.Contains(t, result, "metrics")
+		assert.Contains(t, result, "added")
+		assert.NotContains(t, result, "unchanged") // Unchanged should not appear
+	})
+}
+
+func createTestResultWithExtensionData(t *testing.T, funcName string, extData map[string][]byte) []byte {
+	t.Helper()
+
+	result := TestResult{
+		TestFunction: MinimumTestFunction{
+			FunctionIdent: funcName,
+			FunctionName:  funcName,
+		},
+		ExtensionData: extData,
+	}
+	data, err := result.MarshalMsgpack()
+	require.NoError(t, err)
+	return data
 }

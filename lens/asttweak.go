@@ -44,7 +44,9 @@ const (
 var tmplFS embed.FS
 var astFileLock = newDefaultStripedMutex()
 
-type astModifier struct {
+// ASTModifier provides utilities for modifying Go AST.
+// Extensions can use this to inject custom monitoring at specific points in code.
+type ASTModifier struct {
 	currPointId    atomic.Int32
 	cleanupLock    sync.Mutex
 	cleanupActions []func() error
@@ -60,13 +62,13 @@ func goCacheClean(goenv []string) error {
 }
 
 // MaxPointId returns the highest point currently tracked.
-func (m *astModifier) MaxPointId() int {
+func (m *ASTModifier) MaxPointId() int {
 	return int(m.currPointId.Load())
 }
 
 // Restore restores the modified files to their original state.
 // The go environment must be provided so the build cache can be cleared.
-func (m *astModifier) Restore(goenv []string) (result []error) {
+func (m *ASTModifier) Restore(goenv []string) (result []error) {
 	m.cleanupLock.Lock()
 	defer m.cleanupLock.Unlock()
 	if len(m.cleanupActions) == 0 {
@@ -84,7 +86,7 @@ func (m *astModifier) Restore(goenv []string) (result []error) {
 	return
 }
 
-func (m *astModifier) addCleanupAction(f func() error) {
+func (m *ASTModifier) addCleanupAction(f func() error) {
 	m.cleanupLock.Lock()
 	defer m.cleanupLock.Unlock()
 	m.cleanupActions = append(m.cleanupActions, f)
@@ -97,7 +99,7 @@ type parsedFile struct {
 
 // parsedFileNode provides the currently parsed file.
 // fileLock must be held before invoking, and until fileNode changes are done.
-func (m *astModifier) loadParsedFileNode(filepath string) (*token.FileSet, *ast.File, error) {
+func (m *ASTModifier) loadParsedFileNode(filepath string) (*token.FileSet, *ast.File, error) {
 	file, ok := m.fileNodeMap.Load(filepath)
 	if ok {
 		pf := file.(*parsedFile)
@@ -134,13 +136,13 @@ func (m *astModifier) loadParsedFileNode(filepath string) (*token.FileSet, *ast.
 }
 
 // CommitFile writes pending edits for a single file.
-func (m *astModifier) CommitFile(filepath string) error {
+func (m *ASTModifier) CommitFile(filepath string) error {
 	lock := astFileLock.Lock(filepath)
 	defer lock.Unlock()
 	return m.commitFileInternal(filepath)
 }
 
-func (m *astModifier) commitFileInternal(filepath string) error {
+func (m *ASTModifier) commitFileInternal(filepath string) error {
 	m.commitLock.Lock()
 	defer m.commitLock.Unlock()
 
@@ -154,7 +156,7 @@ func (m *astModifier) commitFileInternal(filepath string) error {
 }
 
 // Commit flushes all pending AST modifications to disk.
-func (m *astModifier) Commit() error {
+func (m *ASTModifier) Commit() error {
 	writeCount := runtime.NumCPU()
 	bufChan := make(chan *bytes.Buffer, writeCount)
 	for i := 0; i < writeCount; i++ {
@@ -182,7 +184,7 @@ func (m *astModifier) Commit() error {
 }
 
 // InjectASTClient prepares a package directory by inserting the configured client code to enable other AST point functions.
-func (m *astModifier) InjectASTClient(pkgDir string, srvPort int, maxFieldRecurse, maxFieldLen int) error {
+func (m *ASTModifier) InjectASTClient(pkgDir string, srvPort int, maxFieldRecurse, maxFieldLen int) error {
 	if matches, _ := filepath.Glob(filepath.Join(pkgDir, injectedFilenamePrefix+"*_gen.go")); len(matches) > 0 {
 		return nil // already been injected into the package
 	}
@@ -315,7 +317,7 @@ func updateConstLiterals(f *ast.File, values map[string]string) {
 }
 
 // backupOrigFile will copy the file to a .bkp file if one does not already exist.
-func (m *astModifier) backupOrigFile(filepath string) error {
+func (m *ASTModifier) backupOrigFile(filepath string) error {
 	bkpFile := filepath + ".bkp"
 	if !FileExists(bkpFile) {
 		if err := CopyFile(filepath, bkpFile); err != nil {
@@ -328,7 +330,7 @@ func (m *astModifier) backupOrigFile(filepath string) error {
 	return nil
 }
 
-func (m *astModifier) nextPointId() (int, error) {
+func (m *ASTModifier) nextPointId() (int, error) {
 	var val int32
 	for {
 		val = m.currPointId.Load()
@@ -343,7 +345,7 @@ func (m *astModifier) nextPointId() (int, error) {
 
 // injectPoint bundles the repetitive “backup → parse → mutate → write” sequence.
 // `modify` gets the function body and the freshly allocated pointID and must mutate the AST in-place.
-func (m *astModifier) injectPoint(filePath, pkg, funcIdent string, modify func(body *ast.BlockStmt, pointID int)) (int, error) {
+func (m *ASTModifier) injectPoint(filePath, pkg, funcIdent string, modify func(body *ast.BlockStmt, pointID int)) (int, error) {
 	lock := astFileLock.Lock(filePath)
 	defer lock.Unlock()
 
@@ -380,7 +382,7 @@ func hasPatchlensMarker(funcDecl *ast.FuncDecl, marker string) bool {
 // InjectFuncPointPanic inserts a defer recovery at the start of the function. This recovery will invoke
 // the client to communicate the state, but then re-panic.  Because this is the first defer statement,
 // it will trigger only if no other recovery exists.
-func (m *astModifier) InjectFuncPointPanic(f *Function) (int, error) {
+func (m *ASTModifier) InjectFuncPointPanic(f *Function) (int, error) {
 	return m.injectPoint(f.FilePath, f.PackageName, f.FunctionIdent, func(body *ast.BlockStmt, pointID int) {
 		// build:
 		//   defer func() {
@@ -432,7 +434,7 @@ func (m *astModifier) InjectFuncPointPanic(f *Function) (int, error) {
 
 // InjectFuncPointReturnStates inserts a state point right before the return points within the function. If the return
 // line has a function call, the return point will be inserted after the call.
-func (m *astModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
+func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 	const modificationMarker = "patchlens:return-states"
 	lock := astFileLock.Lock(fn.FilePath)
 	defer lock.Unlock()
@@ -1036,7 +1038,7 @@ func isRecursiveCall(expr ast.Expr, funcName string) bool {
 
 // InjectFuncPointEntry inserts a SendLensPointMessage client call at the very start of the function to
 // track entry coverage into the function.
-func (m *astModifier) InjectFuncPointEntry(fn *Function) (int, error) {
+func (m *ASTModifier) InjectFuncPointEntry(fn *Function) (int, error) {
 	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID int) {
 		// build SendLensPointMessage(pointID)
 		stmt := &ast.ExprStmt{X: &ast.CallExpr{
@@ -1049,7 +1051,7 @@ func (m *astModifier) InjectFuncPointEntry(fn *Function) (int, error) {
 
 // InjectFuncPointFinish inserts a SendLensPointMessage client call as a defere at the start of the function
 // to indicate that the function.
-func (m *astModifier) InjectFuncPointFinish(fn *Function) (int, error) {
+func (m *ASTModifier) InjectFuncPointFinish(fn *Function) (int, error) {
 	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID int) {
 		// build defer SendLensPointMessage(pointID)
 		deferStmt := &ast.DeferStmt{Call: &ast.CallExpr{
@@ -1077,7 +1079,7 @@ func findFuncDecl(f *ast.File, pkg, ident string) *ast.FuncDecl {
 // The callback returns three values:
 //   - insertText: the text to insert above the current line (e.g. “// …”).  If empty, nothing will be inserted.
 //   - keepGoing: true if we should continue processing subsequent lines.
-func (m *astModifier) InsertFuncLines(fn *Function, cb func(i int, line string) (insertText string, keepGoing bool)) error {
+func (m *ASTModifier) InsertFuncLines(fn *Function, cb func(i int, line string) (insertText string, keepGoing bool)) error {
 	// lock and ensure any pending edits have been flushed
 	lock := astFileLock.Lock(fn.FilePath)
 	defer lock.Unlock()

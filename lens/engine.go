@@ -216,7 +216,7 @@ type ReportWriter interface {
 	//   - reportChartsFile: path where the chart report should be written
 	//   - startTime: when the analysis started (for computing total duration)
 	//   - analysisTime: duration of module change analysis
-	//   - testExpansionTime: duration of test discovery and generation
+	//   - testDiscoveryTime: duration of test discovery or generation
 	//   - testExecutionTime: duration of test execution with monitoring
 	//   - mutationTime: duration of mutation testing
 	//   - changedModules: list of modules with version changes
@@ -229,16 +229,15 @@ type ReportWriter interface {
 	//   - sameCount: number of test cases with identical behavior before/after update
 	//   - diffCount: number of test cases with different behavior before/after update
 	//   - testReports: detailed reports of behavioral differences found
-	//   - performanceRegressionCount: number of tests showing performance regressions
 	//   - globalMutations: results from mutation testing
 	//
 	// Returns:
 	//   - error: any error encountered during report generation or file writing
 	WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
-		analysisTime, testExpansionTime, testExecutionTime, mutationTime time.Duration,
+		analysisTime, testDiscoveryTime, testExecutionTime, mutationTime time.Duration,
 		changedModules []ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
 		projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-		sameCount, diffCount int, testReports []TestReport, performanceRegressionCount int,
+		sameCount, diffCount int, testReports []TestReport,
 		globalMutations MutationResult) error
 }
 
@@ -294,7 +293,12 @@ func (d *DefaultMutationTester) RunMutationTesting(config Config, fastMutations,
 func (d *DefaultMutationTester) Cleanup() {}
 
 // DefaultTestResultAnalyzer provides the standard implementation of TestResultAnalyzer.
-type DefaultTestResultAnalyzer struct{}
+type DefaultTestResultAnalyzer struct {
+	// ExtensionDataAnalyzer is an optional custom function for comparing extension data.
+	// If set, it will be used instead of the default byte comparison in compareTestResultExtensionData.
+	// Extensions can set this to provide semantic diffs of their custom data.
+	ExtensionDataAnalyzer func(preData, postData map[string][]byte) map[string]string
+}
 
 // DiffValues provides a simple human-readable diff explanation of two complex value types.
 // If the values are identical an empty string will be returned.
@@ -383,7 +387,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 
 			// Build map of post-update frames by stack key for proper matching
 			postFramesByKey := bulk.SliceToGroupsBy(func(f CallFrame) string {
-				return stackFramesKey(&bb, projectFrames(f.Stack))
+				return StackFramesKey(&bb, ProjectFrames(f.Stack))
 			}, postResult)
 
 			// Track which frames with the same stack key have been used
@@ -392,7 +396,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 			var lastPreCallTime, lastPostCallTime uint32
 			for i, frame := range frames {
 				// Get matching post-update frame using stack key matching
-				key := stackFramesKey(&bb, projectFrames(frame.Stack))
+				key := StackFramesKey(&bb, ProjectFrames(frame.Stack))
 				idx := usedFrames[key]
 				usedFrames[key] = idx + 1
 
@@ -529,6 +533,13 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 		comparePanics(preResults.ProjectPanics, postResults.ProjectPanics, "project")
 		comparePanics(preResults.ModulePanics, postResults.ModulePanics, "module")
 
+		var extensionDataDiff map[string]string
+		if d.ExtensionDataAnalyzer != nil {
+			extensionDataDiff = d.ExtensionDataAnalyzer(preResults.ExtensionData, postResults.ExtensionData)
+		} else {
+			extensionDataDiff = compareTestResultExtensionData(preResults.ExtensionData, postResults.ExtensionData)
+		}
+
 		if !preResults.TestFailure && postResults.TestFailure {
 			testRegressionCount++
 			fmt.Printf("WARN: Test regression after update: %s\n", postResults.TestFunction.FunctionName)
@@ -553,6 +564,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 			TestRegressionCount: testRegressionCount,
 			SameFieldCount:      testSameCount,
 			DiffFieldCount:      testDiffCount,
+			ExtensionDataDiff:   extensionDataDiff,
 		}
 	}
 
@@ -575,6 +587,48 @@ func (d *DefaultTestResultAnalyzer) loadTestResult(storage Storage, funcIdent st
 		return TestResult{}, false, fmt.Errorf("error unmarshalling results: %w", err)
 	}
 	return result, true, nil
+}
+
+// compareTestResultExtensionData performs default byte-level comparison of extension data.
+// It compares extension data maps by namespace, providing simple change descriptions.
+// Returns a map of namespace -> diff summary, or nil if no differences.
+func compareTestResultExtensionData(preData, postData map[string][]byte) map[string]string {
+	if len(preData) == 0 && len(postData) == 0 {
+		return nil
+	}
+
+	diff := make(map[string]string)
+
+	// Get all unique namespaces from both pre and post
+	namespaces := make(map[string]bool)
+	for ns := range preData {
+		namespaces[ns] = true
+	}
+	for ns := range postData {
+		namespaces[ns] = true
+	}
+
+	// Compare each namespace
+	for ns := range namespaces {
+		pre := preData[ns]
+		post := postData[ns]
+
+		// Default byte comparison
+		if !bytes.Equal(pre, post) {
+			if len(pre) == 0 {
+				diff[ns] = fmt.Sprintf("Added (%d bytes)", len(post))
+			} else if len(post) == 0 {
+				diff[ns] = fmt.Sprintf("Removed (%d bytes)", len(pre))
+			} else {
+				diff[ns] = fmt.Sprintf("Changed (%d -> %d bytes)", len(pre), len(post))
+			}
+		}
+	}
+
+	if len(diff) == 0 {
+		return nil
+	}
+	return diff
 }
 
 // DefaultStorageProvider provides the standard implementation of StorageProvider using BadgerDB.
@@ -612,16 +666,34 @@ func (s *SingletonStorageProvider) NewStorage() (Storage, error) {
 // DefaultReportWriter provides the standard implementation of ReportWriter.
 type DefaultReportWriter struct{}
 
-func (d *DefaultReportWriter) WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
-	analysisTime, testExpansionTime, testExecutionTime, mutationTime time.Duration,
-	changedModules []ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
-	projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	sameCount, diffCount int, testReports []TestReport, performanceRegressionCount int,
+func (d *DefaultReportWriter) WriteReportFiles(jsonPath, chartPath string, startTime time.Time,
+	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
+	changedModules []ModuleChange, checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
+	projectFieldChecks int, projectCallingFunctions []*CallerFunction, relevantTestFunctions []*TestFunction,
+	testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
 	globalMutations MutationResult) error {
-	return WriteReportFiles(reportJsonFile, reportChartsFile, startTime, analysisTime, testExpansionTime,
-		testExecutionTime, mutationTime, changedModules, checkedModules, moduleChangeCount,
-		moduleChangesReachedInTesting, projectFieldChecks, callingFunctions, testFunctions,
-		sameCount, diffCount, testReports, performanceRegressionCount, globalMutations)
+	reachableModuleFunctionsIdents, relevantProjectFunctionIdents, relevantTestFunctionsIdents,
+		performanceChanges, testDetails, rootM, syntheticTestFuncCount := PrepareReportData(
+		changedModules, projectCallingFunctions, relevantTestFunctions, testResults, moduleChangeFuncCount)
+
+	err := writeReportJSON(jsonPath, startTime, analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration,
+		rootM.Name, rootM.PriorVersion, rootM.NewVersion,
+		checkedModules, moduleChangeFuncCount, moduleChangesReachedInTesting,
+		reachableModuleFunctionsIdents,
+		relevantProjectFunctionIdents,
+		projectFieldChecks, relevantTestFunctionsIdents, testFieldSameCount, testFieldDiffCount,
+		syntheticTestFuncCount, globalMutations, performanceChanges, testDetails)
+	if err != nil {
+		return err
+	}
+
+	err = writeReportCharts(chartPath, rootM.Name, rootM.PriorVersion, rootM.NewVersion,
+		moduleChangeFuncCount, len(reachableModuleFunctionsIdents), moduleChangesReachedInTesting,
+		testFieldSameCount, testFieldDiffCount, testResults, globalMutations)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // AnalysisEngine orchestrates module change analysis, testing, and reporting.
@@ -741,7 +813,7 @@ func (e *AnalysisEngine) Run() error {
 			startTime, analysisEndTime.Sub(startTime), 0, 0, 0,
 			initialModules.changedModules, checkedModuleNames, 0, 0,
 			0, nil, nil,
-			0, 0, nil, 0, MutationResult{})
+			0, 0, nil, MutationResult{})
 	}
 	log.Printf("Changed function count: %d", len(moduleChanges))
 	if logFunctionCallChains {
@@ -764,7 +836,7 @@ func (e *AnalysisEngine) Run() error {
 			startTime, analysisEndTime.Sub(startTime), 0, 0, 0,
 			initialModules.changedModules, checkedModuleNames, 0, 0,
 			0, callingFunctions, nil,
-			0, 0, nil, 0, MutationResult{})
+			0, 0, nil, MutationResult{})
 	}
 	log.Printf("Identified change entry point count: %d", len(callingFunctions))
 	if logFunctionCallChains {
@@ -775,7 +847,7 @@ func (e *AnalysisEngine) Run() error {
 
 	// Analyze test functions to see which tests exercise these caller functions
 	testFunctions, err := e.TestProvider.ProvideTests(*e.Config, callingFunctions)
-	testExpansionEndTime := time.Now()
+	testDiscoveryEndTime := time.Now()
 	if err != nil {
 		return fmt.Errorf("error providing tests: %w", err)
 	}
@@ -784,10 +856,10 @@ func (e *AnalysisEngine) Run() error {
 	if len(testFunctions) == 0 {
 		log.Printf("Unable to find or create relevant test functions, exiting...")
 		return e.ReportWriter.WriteReportFiles(e.Config.ReportJsonFile, e.Config.ReportChartsFile,
-			startTime, analysisEndTime.Sub(startTime), testExpansionEndTime.Sub(analysisEndTime), 0, 0,
+			startTime, analysisEndTime.Sub(startTime), testDiscoveryEndTime.Sub(analysisEndTime), 0, 0,
 			initialModules.changedModules, checkedModuleNames, len(moduleChanges), 0,
 			0, callingFunctions, testFunctions,
-			0, 0, nil, 0, MutationResult{})
+			0, 0, nil, MutationResult{})
 	}
 	if logFunctionCallChains {
 		for _, test := range testFunctions {
@@ -840,11 +912,13 @@ func (e *AnalysisEngine) Run() error {
 
 	// Use ReportWriter
 	err = e.ReportWriter.WriteReportFiles(e.Config.ReportJsonFile, e.Config.ReportChartsFile, startTime,
-		analysisEndTime.Sub(startTime), testExpansionEndTime.Sub(analysisEndTime),
-		testExecutionAnalysisEndTime.Sub(testExpansionEndTime), mutationEndTime.Sub(testExecutionAnalysisEndTime),
+		analysisEndTime.Sub(startTime),
+		testDiscoveryEndTime.Sub(analysisEndTime),
+		testExecutionAnalysisEndTime.Sub(testDiscoveryEndTime),
+		mutationEndTime.Sub(testExecutionAnalysisEndTime),
 		initialModules.changedModules, checkedModuleNames, len(moduleChanges), moduleChangesReachedInTesting,
 		projectFieldChecks, callingFunctions, testFunctions, sameCount, diffCount, testReports,
-		0, globalMutations)
+		globalMutations)
 	if err != nil {
 		return fmt.Errorf("error writing report files: %w", err)
 	}

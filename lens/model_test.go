@@ -1048,3 +1048,54 @@ func TestCallFrameTimeMillis(t *testing.T) {
 		assert.Equal(t, uint32(300), decodedFrames[2].TimeMillis)
 	})
 }
+
+func TestTestResult_ExtensionData_Serialization(t *testing.T) {
+	// Create a test result with extension data
+	original := TestResult{
+		TestFunction: MinimumTestFunction{
+			FunctionIdent: "test.Example",
+			FunctionName:  "Example",
+		},
+		ExtensionData: map[string][]byte{
+			"security:capabilities": []byte(`{"network":true,"filesystem":false}`),
+			"custom:metrics":        []byte(`{"count":42}`),
+		},
+	}
+
+	// Serialize
+	data, err := original.MarshalMsgpack()
+	require.NoError(t, err)
+	require.NotEmpty(t, data)
+
+	// Deserialize
+	var decoded TestResult
+	err = decoded.UnmarshalMsgpack(data)
+	require.NoError(t, err)
+
+	// Verify extension data preserved
+	assert.Equal(t, original.ExtensionData, decoded.ExtensionData)
+	assert.Equal(t, string(original.ExtensionData["security:capabilities"]),
+		string(decoded.ExtensionData["security:capabilities"]))
+	assert.Equal(t, string(original.ExtensionData["custom:metrics"]),
+		string(decoded.ExtensionData["custom:metrics"]))
+}
+
+func TestTestResult_ExtensionData_Empty(t *testing.T) {
+	// Test with no extension data
+	original := TestResult{
+		TestFunction: MinimumTestFunction{
+			FunctionIdent: "test.Example",
+			FunctionName:  "Example",
+		},
+	}
+
+	data, err := original.MarshalMsgpack()
+	require.NoError(t, err)
+
+	var decoded TestResult
+	err = decoded.UnmarshalMsgpack(data)
+	require.NoError(t, err)
+
+	// Should be nil or empty
+	assert.Empty(t, decoded.ExtensionData)
+}

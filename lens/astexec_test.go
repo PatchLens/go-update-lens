@@ -248,7 +248,7 @@ func TestProjectFrames(t *testing.T) {
 	out := StackFrame{File: "/ext/out.go", Line: 2, Function: "f"}
 	frames := []StackFrame{in, out}
 
-	got := projectFrames(frames)
+	got := ProjectFrames(frames)
 	require.Len(t, got, 1)
 	assert.Equal(t, in, got[0])
 }
@@ -258,9 +258,9 @@ func TestStackFramesKey(t *testing.T) {
 	f2 := StackFrame{File: "b.go", Line: 2, Function: "fb"}
 
 	var bb bytes.Buffer
-	key1 := stackFramesKey(&bb, []StackFrame{f1, f2})
-	key2 := stackFramesKey(&bb, []StackFrame{f1, f2})
-	key3 := stackFramesKey(&bb, []StackFrame{f2, f1})
+	key1 := StackFramesKey(&bb, []StackFrame{f1, f2})
+	key2 := StackFramesKey(&bb, []StackFrame{f1, f2})
+	key3 := StackFramesKey(&bb, []StackFrame{f2, f1})
 
 	assert.Equal(t, key1, key2)
 	assert.NotEqual(t, key1, key3)
