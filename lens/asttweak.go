@@ -586,6 +586,245 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 	return pointIDs, nil
 }
 
+// InjectFuncPointBeforeCall injects monitoring points before call expressions that match the predicate.
+// The predicate function is called for each CallExpr in the function body.
+// If it returns true, a state monitoring point is injected immediately before that call.
+// Returns the list of point IDs that were injected.
+func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) bool) ([]int, error) {
+	const modificationMarker = "patchlens:before-call"
+	lock := astFileLock.Lock(fn.FilePath)
+	defer lock.Unlock()
+
+	_, fileNode, err := m.loadParsedFileNode(fn.FilePath)
+	if err != nil {
+		return nil, err
+	}
+	funcDecl := findFuncDecl(fileNode, fn.PackageName, fn.FunctionIdent)
+	if funcDecl == nil || funcDecl.Body == nil {
+		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionName, fn.FilePath)
+	} else if hasPatchlensMarker(funcDecl, modificationMarker) {
+		return []int{}, nil // already inserted
+	}
+
+	var pointIDs []int
+	var buf bytes.Buffer
+
+	// Helper to check if a node contains a matching call (single traversal)
+	hasMatchingCall := func(node ast.Node) bool {
+		var found bool
+		ast.Inspect(node, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && shouldInject(call) {
+				found = true
+				return false
+			}
+			return true
+		})
+		return found
+	}
+
+	var rewriteBlock func(*ast.BlockStmt) error
+	rewriteBlock = func(blk *ast.BlockStmt) error {
+		newStmts := make([]ast.Stmt, 0, len(blk.List))
+		for _, st := range blk.List {
+			// Check if this statement contains a matching call (excluding nested blocks)
+			var needsInstrumentation bool
+			switch stmt := st.(type) {
+			case *ast.ExprStmt:
+				needsInstrumentation = hasMatchingCall(stmt.X)
+			case *ast.AssignStmt:
+				needsInstrumentation = hasMatchingCall(stmt)
+			case *ast.ReturnStmt:
+				needsInstrumentation = hasMatchingCall(stmt)
+			case *ast.DeferStmt:
+				needsInstrumentation = shouldInject(stmt.Call)
+			case *ast.GoStmt:
+				needsInstrumentation = shouldInject(stmt.Call)
+			case *ast.DeclStmt:
+				// Handle var x = call()
+				needsInstrumentation = hasMatchingCall(stmt)
+			case *ast.SendStmt:
+				// Handle ch <- call()
+				needsInstrumentation = hasMatchingCall(stmt.Value)
+			case *ast.IfStmt:
+				// Handle if x := call(); condition and if call() { }
+				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
+					needsInstrumentation = true
+				} else if hasMatchingCall(stmt.Cond) {
+					needsInstrumentation = true
+				}
+			case *ast.ForStmt:
+				// Handle for i := call(); condition; post
+				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
+					needsInstrumentation = true
+				} else if stmt.Cond != nil && hasMatchingCall(stmt.Cond) {
+					needsInstrumentation = true
+				}
+				// Post statement handled separately in recursion section
+			case *ast.RangeStmt:
+				// Handle for x := range call()
+				needsInstrumentation = hasMatchingCall(stmt.X)
+			case *ast.SwitchStmt:
+				// Handle switch x := call(); x and switch call() { }
+				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
+					needsInstrumentation = true
+				} else if stmt.Tag != nil && hasMatchingCall(stmt.Tag) {
+					needsInstrumentation = true
+				}
+			case *ast.TypeSwitchStmt:
+				// Handle switch x := call().(type) and switch call().(type) { }
+				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
+					needsInstrumentation = true
+				} else if hasMatchingCall(stmt.Assign) {
+					needsInstrumentation = true
+				}
+			case *ast.SelectStmt:
+				// Handle select { case ch <- call(): ... }
+				// Check all comm clauses
+				for _, commStmt := range stmt.Body.List {
+					if cc, ok := commStmt.(*ast.CommClause); ok && cc.Comm != nil {
+						if hasMatchingCall(cc.Comm) {
+							needsInstrumentation = true
+							break
+						}
+					}
+				}
+			}
+
+			if needsInstrumentation {
+				// Inject monitoring before this statement
+				pointID, err := m.nextPointId()
+				if err != nil {
+					return err
+				}
+				pointIDs = append(pointIDs, pointID)
+
+				// Get visible declarations at this point
+				decls := visibleDeclsBefore(funcDecl, st.Pos())
+
+				// Build instrumentation: SendLensPointStateMessage(pointID, ...)
+				instrStmt, err := buildCallInstrumentation(&buf, pointID, decls)
+				if err != nil {
+					return err
+				}
+
+				// Add instrumentation then the original statement
+				newStmts = append(newStmts, instrStmt, st)
+			} else {
+				newStmts = append(newStmts, st)
+			}
+
+			// Recursively process nested blocks
+			switch s := st.(type) {
+			case *ast.BlockStmt:
+				if err := rewriteBlock(s); err != nil {
+					return err
+				}
+			case *ast.IfStmt:
+				if err := rewriteBlock(s.Body); err != nil {
+					return err
+				}
+				if s.Else != nil {
+					switch e := s.Else.(type) {
+					case *ast.BlockStmt:
+						if err := rewriteBlock(e); err != nil {
+							return err
+						}
+					case *ast.IfStmt:
+						if err := rewriteBlock(e.Body); err != nil {
+							return err
+						}
+					}
+				}
+			case *ast.ForStmt:
+				// If Post contains a matching call, inject at the end of loop body
+				if s.Post != nil && hasMatchingCall(s.Post) {
+					pointID, err := m.nextPointId()
+					if err != nil {
+						return err
+					}
+					pointIDs = append(pointIDs, pointID)
+					decls := visibleDeclsBefore(funcDecl, s.Post.Pos())
+					instrStmt, err := buildCallInstrumentation(&buf, pointID, decls)
+					if err != nil {
+						return err
+					}
+					// Add instrumentation at the end of the loop body
+					s.Body.List = append(s.Body.List, instrStmt)
+				}
+				if err := rewriteBlock(s.Body); err != nil {
+					return err
+				}
+			case *ast.RangeStmt:
+				if err := rewriteBlock(s.Body); err != nil {
+					return err
+				}
+			case *ast.SwitchStmt:
+				for _, stmt := range s.Body.List {
+					if cc, ok := stmt.(*ast.CaseClause); ok {
+						blk := &ast.BlockStmt{List: cc.Body}
+						if err := rewriteBlock(blk); err != nil {
+							return err
+						}
+						cc.Body = blk.List
+					}
+				}
+			case *ast.TypeSwitchStmt:
+				for _, stmt := range s.Body.List {
+					if cc, ok := stmt.(*ast.CaseClause); ok {
+						blk := &ast.BlockStmt{List: cc.Body}
+						if err := rewriteBlock(blk); err != nil {
+							return err
+						}
+						cc.Body = blk.List
+					}
+				}
+			case *ast.SelectStmt:
+				for _, stmt := range s.Body.List {
+					if cc, ok := stmt.(*ast.CommClause); ok {
+						blk := &ast.BlockStmt{List: cc.Body}
+						if err := rewriteBlock(blk); err != nil {
+							return err
+						}
+						cc.Body = blk.List
+					}
+				}
+			}
+		}
+		blk.List = newStmts
+		return nil
+	}
+
+	if err := rewriteBlock(funcDecl.Body); err != nil {
+		return nil, fmt.Errorf("ast rewrite failure %s: %w", fn.FilePath, err)
+	}
+
+	// Mark as updated
+	if funcDecl.Doc == nil {
+		funcDecl.Doc = &ast.CommentGroup{}
+	}
+	funcDecl.Doc.List = append(funcDecl.Doc.List, &ast.Comment{
+		Slash: funcDecl.Pos() - 1,
+		Text:  "// " + modificationMarker,
+	})
+
+	return pointIDs, nil
+}
+
+// buildCallInstrumentation creates a statement that sends field state to the monitoring server.
+func buildCallInstrumentation(buf *bytes.Buffer, pointID int, decls []declInfo) (ast.Stmt, error) {
+	// Build snapshots of all visible variables
+	snaps := make([]ast.Expr, 0, len(decls))
+	seen := make(map[string]bool, len(decls))
+	for _, d := range decls {
+		if d.ident.Name == literalNil || seen[d.ident.Name] {
+			continue
+		}
+		seen[d.ident.Name] = true
+		snaps = append(snaps, makeSnapshotLit(d.ident.Name, ast.NewIdent(d.ident.Name)))
+	}
+	return makeSendLensPointStateMessageStmt(buf, pointID, snaps)
+}
+
 type declInfo struct {
 	ident *ast.Ident
 	pos   token.Pos

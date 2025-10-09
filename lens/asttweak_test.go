@@ -1011,3 +1011,587 @@ func DoNothing() {
 		})
 	}
 }
+
+func TestInjectFuncPointBeforeCall(t *testing.T) {
+	t.Parallel()
+
+	const (
+		testPkgName     = "testpkg"
+		fmtPackage      = "fmt"
+		printfFuncName  = "Printf"
+		sprintfFuncName = "Sprintf"
+	)
+
+	testCases := []struct {
+		name           string
+		src            string
+		funcName       string
+		predicate      func(*ast.CallExpr) bool
+		expectedPoints int
+		expectedCalls  map[string]int // pkg.Func -> count after injection
+	}{
+		{
+			name: "single_call",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(data string) {
+	fmt.Printf("Data: %s\n", data)
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Printf": 1},
+		},
+		{
+			name: "multiple_calls_same_function",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(a, b string) {
+	fmt.Printf("First: %s\n", a)
+	fmt.Println("Middle")
+	fmt.Printf("Second: %s\n", b)
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 2,
+			expectedCalls:  map[string]int{"fmt.Printf": 2, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_nested_blocks",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(data string) {
+	if len(data) > 0 {
+		fmt.Printf("Data: %s\n", data)
+	}
+	for i := 0; i < 10; i++ {
+		fmt.Printf("Index: %d\n", i)
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 2,
+			expectedCalls:  map[string]int{"fmt.Printf": 2},
+		},
+		{
+			name: "no_matching_calls",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(data string) {
+	fmt.Println("No Printf here")
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 0,
+			expectedCalls:  map[string]int{"fmt.Println": 1},
+		},
+		{
+			name: "call_in_switch",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(op string) {
+	switch op {
+	case "print":
+		fmt.Printf("Printing\n")
+	case "log":
+		fmt.Println("Logging")
+	default:
+		fmt.Printf("Unknown\n")
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 2,
+			expectedCalls:  map[string]int{"fmt.Printf": 2, "fmt.Println": 1},
+		},
+		{
+			name: "predicate_never_matches",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(data string) {
+	fmt.Printf("Data: %s\n", data)
+	fmt.Println("Log message")
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				return false // Never match
+			},
+			expectedPoints: 0,
+			expectedCalls:  map[string]int{"fmt.Printf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_var_declaration",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	var x = fmt.Sprintf("test")
+	_ = x
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
+		},
+		{
+			name: "call_in_if_init",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	if x := fmt.Sprintf("test"); len(x) > 0 {
+		fmt.Println(x)
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_for_init",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	for i := fmt.Sprint(0); i == "0"; i = fmt.Sprint(1) {
+		break
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == "Sprint"
+					}
+				}
+				return false
+			},
+			expectedPoints: 2, // Init and Post
+			expectedCalls:  map[string]int{"fmt.Sprint": 2},
+		},
+		{
+			name: "call_in_switch_init",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	switch x := fmt.Sprintf("test"); x {
+	case "test":
+		fmt.Println("matched")
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_range_expr",
+			src: `package testpkg
+import "fmt"
+
+func GetSlice() []string { return []string{"a", "b"} }
+
+func ProcessData() {
+	for _, v := range GetSlice() {
+		fmt.Println(v)
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					return ident.Name == "GetSlice"
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Println": 1},
+		},
+		{
+			name: "multiple_calls_same_statement",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	x, y := fmt.Sprintf("a"), fmt.Sprintf("b")
+	_, _ = x, y
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1, // One monitoring point before the entire statement
+			expectedCalls:  map[string]int{"fmt.Sprintf": 2},
+		},
+		{
+			name: "call_in_return",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() string {
+	return fmt.Sprintf("result")
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
+		},
+		{
+			name: "call_in_assignment",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	var x string
+	x = fmt.Sprintf("test")
+	_ = x
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
+		},
+		{
+			name: "call_with_defer",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	defer fmt.Printf("cleanup\n")
+	fmt.Println("work")
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Printf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_with_go",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	go fmt.Printf("async\n")
+	fmt.Println("sync")
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Printf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_channel_send",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(ch chan string) {
+	ch <- fmt.Sprintf("message")
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
+		},
+		{
+			name: "call_in_select",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(ch chan string) {
+	select {
+	case ch <- fmt.Sprintf("send"):
+	case msg := <-ch:
+		fmt.Println(msg)
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_if_condition",
+			src: `package testpkg
+import "fmt"
+
+func IsPositive(x int) bool { return x > 0 }
+
+func ProcessData() {
+	if IsPositive(fmt.Sprintf("test") == "test") {
+		fmt.Println("positive")
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					return ident.Name == "IsPositive"
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
+		},
+		{
+			name: "call_in_for_condition",
+			src: `package testpkg
+import "fmt"
+
+func ShouldContinue() bool { return false }
+
+func ProcessData() {
+	for ; ShouldContinue(); {
+		fmt.Println("loop")
+		break
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					return ident.Name == "ShouldContinue"
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Println": 1},
+		},
+		{
+			name: "call_in_switch_tag",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData() {
+	switch fmt.Sprintf("test") {
+	case "test":
+		fmt.Println("matched")
+	default:
+		fmt.Println("default")
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok {
+						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+					}
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 2},
+		},
+		{
+			name: "call_in_type_switch_assign",
+			src: `package testpkg
+import "fmt"
+
+func GetInterface() interface{} { return "test" }
+
+func ProcessData() {
+	switch v := GetInterface().(type) {
+	case string:
+		fmt.Println(v)
+	default:
+		fmt.Println("unknown")
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					return ident.Name == "GetInterface"
+				}
+				return false
+			},
+			expectedPoints: 1,
+			expectedCalls:  map[string]int{"fmt.Println": 2},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, "test.go")
+			require.NoError(t, os.WriteFile(filePath, []byte(tc.src), 0o644))
+			modifier := &ASTModifier{}
+			fn := Function{
+				FunctionIdent: testPkgName + ":" + tc.funcName,
+				FunctionName:  tc.funcName,
+				PackageName:   testPkgName,
+				FilePath:      filePath,
+			}
+
+			pointIDs, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
+			require.NoError(t, err)
+			require.Len(t, pointIDs, tc.expectedPoints)
+
+			// Verify point IDs are sequential
+			for i, id := range pointIDs {
+				assert.Equal(t, i, id)
+			}
+
+			require.NoError(t, modifier.CommitFile(filePath))
+
+			// Read and parse modified file
+			modifiedSrc, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			modifiedStr := string(modifiedSrc)
+
+			fset := token.NewFileSet()
+			modFile, err := parser.ParseFile(fset, filePath, nil, 0)
+			require.NoError(t, err)
+
+			// Verify modification marker
+			if tc.expectedPoints > 0 {
+				assert.Contains(t, modifiedStr, "patchlens:before-call")
+			}
+
+			// Find function and count calls
+			var funcDecl *ast.FuncDecl
+			for _, decl := range modFile.Decls {
+				if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == tc.funcName {
+					funcDecl = fd
+					break
+				}
+			}
+			require.NotNil(t, funcDecl)
+
+			// Count monitoring and target calls
+			var monitoringCount int
+			callCounts := make(map[string]int)
+			ast.Inspect(funcDecl, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "SendLensPointStateMessage" {
+						monitoringCount++
+					}
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						if x, ok := sel.X.(*ast.Ident); ok {
+							callCounts[x.Name+"."+sel.Sel.Name]++
+						}
+					}
+				}
+				return true
+			})
+
+			assert.Equal(t, tc.expectedPoints, monitoringCount)
+
+			// Verify original calls are preserved
+			for fnName, expectedCount := range tc.expectedCalls {
+				assert.Equal(t, expectedCount, callCounts[fnName])
+			}
+
+			// Verify idempotency
+			pointIDs2, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
+			require.NoError(t, err)
+			require.Empty(t, pointIDs2)
+		})
+	}
+}
