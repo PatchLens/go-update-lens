@@ -2,6 +2,7 @@ package lens
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1439,7 +1441,7 @@ func ProcessData() {
 				return false
 			},
 			expectedPoints: 1,
-			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
+			expectedCalls:  map[string]int{"fmt.Sprintf": 2, "fmt.Println": 1},
 		},
 		{
 			name: "call_in_for_condition",
@@ -1594,4 +1596,285 @@ func ProcessData() {
 			require.Empty(t, pointIDs2)
 		})
 	}
+}
+
+func TestBuildCallInstrumentationWithArgs(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		callExpr      string
+		expectedArgs  []string // Expected argument names after transformation
+		expectedCount int
+	}{
+		{
+			name:          "zero arguments",
+			callExpr:      "foo()",
+			expectedArgs:  []string{},
+			expectedCount: 0,
+		},
+		{
+			name:          "single argument",
+			callExpr:      "foo(x)",
+			expectedArgs:  []string{"arg0"},
+			expectedCount: 1,
+		},
+		{
+			name:          "multiple arguments",
+			callExpr:      "foo(a, b, c)",
+			expectedArgs:  []string{"arg0", "arg1", "arg2"},
+			expectedCount: 3,
+		},
+		{
+			name:          "complex expressions",
+			callExpr:      "foo(x+y, bar(), \"literal\")",
+			expectedArgs:  []string{"arg0", "arg1", "arg2"},
+			expectedCount: 3,
+		},
+		{
+			name:          "variadic call with ellipsis",
+			callExpr:      "append(slice, elements...)",
+			expectedArgs:  []string{"arg0", "arg1"},
+			expectedCount: 2,
+		},
+		{
+			name:          "variadic with explicit args",
+			callExpr:      "fmt.Printf(\"%s %d\", str, num)",
+			expectedArgs:  []string{"arg0", "arg1", "arg2"},
+			expectedCount: 3,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Parse the call expression
+			call, err := parser.ParseExpr(tc.callExpr)
+			require.NoError(t, err)
+			callExpr, ok := call.(*ast.CallExpr)
+			require.True(t, ok, "Expected CallExpr")
+
+			// Build instrumentation
+			var buf bytes.Buffer
+			stmt, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr)
+			require.NoError(t, err)
+			require.NotNil(t, stmt)
+
+			// Verify it's an ExprStmt containing a CallExpr
+			exprStmt, ok := stmt.(*ast.ExprStmt)
+			require.True(t, ok)
+			monitorCall, ok := exprStmt.X.(*ast.CallExpr)
+			require.True(t, ok)
+
+			// Verify the function being called is SendLensPointStateMessage
+			funIdent, ok := monitorCall.Fun.(*ast.Ident)
+			require.True(t, ok)
+			assert.Equal(t, "SendLensPointStateMessage", funIdent.Name)
+
+			// Verify point ID (first argument)
+			require.NotEmpty(t, monitorCall.Args)
+			pointIDLit, ok := monitorCall.Args[0].(*ast.BasicLit)
+			require.True(t, ok)
+			assert.Equal(t, "42", pointIDLit.Value)
+
+			// Verify number of snapshots matches expected
+			snapshotCount := len(monitorCall.Args) - 1 // Subtract point ID
+			assert.Equal(t, tc.expectedCount, snapshotCount)
+
+			// Verify each snapshot has correct naming
+			for i, expectedName := range tc.expectedArgs {
+				snapshot, ok := monitorCall.Args[i+1].(*ast.CompositeLit)
+				require.True(t, ok)
+
+				// Find the Name field
+				var nameValue string
+				for _, elt := range snapshot.Elts {
+					kv, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					keyIdent, ok := kv.Key.(*ast.Ident)
+					if !ok || keyIdent.Name != "Name" {
+						continue
+					}
+					namelit, ok := kv.Value.(*ast.BasicLit)
+					require.True(t, ok)
+					nameValue, err = strconv.Unquote(namelit.Value)
+					require.NoError(t, err)
+					break
+				}
+				assert.Equal(t, expectedName, nameValue, "Snapshot %d name mismatch", i)
+			}
+		})
+	}
+
+	t.Run("Ellipsis", func(t *testing.T) {
+		// Test that ellipsis arguments are handled correctly
+		src := "append(slice, elements...)"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmt, err := buildCallInstrumentationWithArgs(&buf, 1, callExpr)
+		require.NoError(t, err)
+
+		// Format the statement to verify it's valid Go code
+		buf.Reset()
+		err = format.Node(&buf, token.NewFileSet(), stmt)
+		require.NoError(t, err)
+
+		generated := buf.String()
+		// Should have arg0 and arg1
+		assert.Contains(t, generated, "arg0")
+		assert.Contains(t, generated, "arg1")
+		// Should reference the underlying element expression, not the ellipsis itself
+		assert.Contains(t, generated, "elements")
+	})
+}
+
+func TestMakeSnapshotLitWithArgPrefix(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		inputName    string
+		expectedName string
+	}{
+		{
+			name:         "arg prefix transformation",
+			inputName:    "lenSyntheticArg0",
+			expectedName: "arg0",
+		},
+		{
+			name:         "arg prefix with higher index",
+			inputName:    "lenSyntheticArg42",
+			expectedName: "arg42",
+		},
+		{
+			name:         "ret prefix unchanged",
+			inputName:    "lenSyntheticRet0",
+			expectedName: "ret0",
+		},
+		{
+			name:         "rec prefix unchanged",
+			inputName:    "lenSyntheticRec0",
+			expectedName: "rec0",
+		},
+		{
+			name:         "no prefix",
+			inputName:    "regularName",
+			expectedName: "regularName",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := makeSnapshotLit(tc.inputName, ast.NewIdent("value"))
+
+			// Extract the Name field value
+			composite, ok := snapshot.(*ast.CompositeLit)
+			require.True(t, ok)
+
+			var nameValue string
+			for _, elt := range composite.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				keyIdent, ok := kv.Key.(*ast.Ident)
+				if !ok || keyIdent.Name != "Name" {
+					continue
+				}
+				namelit, ok := kv.Value.(*ast.BasicLit)
+				require.True(t, ok)
+				var err error
+				nameValue, err = strconv.Unquote(namelit.Value)
+				require.NoError(t, err)
+				break
+			}
+
+			assert.Equal(t, tc.expectedName, nameValue)
+		})
+	}
+}
+
+func TestInjectFuncPointBeforeCallArgCapture(t *testing.T) {
+	t.Parallel()
+
+	// Integration test: verify that InjectFuncPointBeforeCall uses the arg naming convention
+	src := `package testpkg
+import "fmt"
+
+func ProcessData(x, y int) {
+	fmt.Printf("%d %d\n", x, y)
+}
+`
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test.go")
+	require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+	modifier := &ASTModifier{}
+	fn := Function{
+		FunctionIdent: "testpkg:ProcessData",
+		FunctionName:  "ProcessData",
+		PackageName:   "testpkg",
+		FilePath:      filePath,
+	}
+
+	// Inject monitoring before fmt.Printf calls
+	pointIDs, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok {
+				return x.Name == "fmt" && sel.Sel.Name == "Printf"
+			}
+		}
+		return false
+	})
+	require.NoError(t, err)
+	require.Len(t, pointIDs, 1)
+
+	require.NoError(t, modifier.CommitFile(filePath))
+
+	// Read modified file
+	modifiedSrc, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	modifiedStr := string(modifiedSrc)
+
+	// Verify the monitoring call was inserted
+	assert.Contains(t, modifiedStr, "SendLensPointStateMessage")
+
+	// Parse the modified file to verify argument naming
+	fset := token.NewFileSet()
+	modFile, err := parser.ParseFile(fset, filePath, nil, 0)
+	require.NoError(t, err)
+
+	// Find the monitoring call
+	var foundMonitoringCall bool
+	ast.Inspect(modFile, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "SendLensPointStateMessage" {
+				foundMonitoringCall = true
+
+				// Verify arguments (should have point ID + 3 snapshots for fmt.Printf args)
+				// Point ID + arg0 (format string) + arg1 (x) + arg2 (y)
+				assert.NotEmpty(t, call.Args)
+
+				// Check that snapshots use "arg" naming
+				buf := bytes.Buffer{}
+				for i := 1; i < len(call.Args); i++ {
+					buf.Reset()
+					err := format.Node(&buf, token.NewFileSet(), call.Args[i])
+					require.NoError(t, err)
+					snapshot := buf.String()
+					// Should contain "arg" in the name field
+					assert.Contains(t, snapshot, fmt.Sprintf("arg%d", i-1))
+				}
+				return false
+			}
+		}
+		return true
+	})
+
+	assert.True(t, foundMonitoringCall)
 }

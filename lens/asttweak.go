@@ -34,6 +34,7 @@ const (
 	syntheticFieldNamePrefixTemp      = "lenSyntheticTmp"
 	syntheticFieldNamePrefixReturn    = "lenSyntheticRet"
 	syntheticFieldNamePrefixRecursive = "lenSyntheticRec"
+	syntheticFieldNamePrefixArg       = "lenSyntheticArg"
 	literalNil                        = "nil"
 )
 
@@ -97,7 +98,7 @@ type parsedFile struct {
 	file *ast.File
 }
 
-// parsedFileNode provides the currently parsed file.
+// loadParsedFileNode provides the currently parsed file.
 // fileLock must be held before invoking, and until fileNode changes are done.
 func (m *ASTModifier) loadParsedFileNode(filepath string) (*token.FileSet, *ast.File, error) {
 	file, ok := m.fileNodeMap.Load(filepath)
@@ -589,6 +590,10 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 // InjectFuncPointBeforeCall injects monitoring points before call expressions that match the predicate.
 // The predicate function is called for each CallExpr in the function body.
 // If it returns true, a state monitoring point is injected immediately before that call.
+//
+// The monitoring point captures only the arguments passed to the matched call, not all visible variables,
+// to reduce memory overhead and focus on the specific data being passed to the function.
+//
 // Returns the list of point IDs that were injected.
 func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) bool) ([]int, error) {
 	const modificationMarker = "patchlens:before-call"
@@ -609,17 +614,18 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	var pointIDs []int
 	var buf bytes.Buffer
 
-	// Helper to check if a node contains a matching call (single traversal)
-	hasMatchingCall := func(node ast.Node) bool {
-		var found bool
+	// Helper to find a matching call in a node (single traversal)
+	// Returns the matched CallExpr or nil if not found
+	findMatchingCall := func(node ast.Node) *ast.CallExpr {
+		var matchedCall *ast.CallExpr
 		ast.Inspect(node, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok && shouldInject(call) {
-				found = true
+				matchedCall = call
 				return false
 			}
 			return true
 		})
-		return found
+		return matchedCall
 	}
 
 	var rewriteBlock func(*ast.BlockStmt) error
@@ -627,82 +633,87 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		newStmts := make([]ast.Stmt, 0, len(blk.List))
 		for _, st := range blk.List {
 			// Check if this statement contains a matching call (excluding nested blocks)
-			var needsInstrumentation bool
+			var matchedCall *ast.CallExpr
 			switch stmt := st.(type) {
 			case *ast.ExprStmt:
-				needsInstrumentation = hasMatchingCall(stmt.X)
+				matchedCall = findMatchingCall(stmt.X)
 			case *ast.AssignStmt:
-				needsInstrumentation = hasMatchingCall(stmt)
+				matchedCall = findMatchingCall(stmt)
 			case *ast.ReturnStmt:
-				needsInstrumentation = hasMatchingCall(stmt)
+				matchedCall = findMatchingCall(stmt)
 			case *ast.DeferStmt:
-				needsInstrumentation = shouldInject(stmt.Call)
+				if shouldInject(stmt.Call) {
+					matchedCall = stmt.Call
+				}
 			case *ast.GoStmt:
-				needsInstrumentation = shouldInject(stmt.Call)
+				if shouldInject(stmt.Call) {
+					matchedCall = stmt.Call
+				}
 			case *ast.DeclStmt:
 				// Handle var x = call()
-				needsInstrumentation = hasMatchingCall(stmt)
+				matchedCall = findMatchingCall(stmt)
 			case *ast.SendStmt:
 				// Handle ch <- call()
-				needsInstrumentation = hasMatchingCall(stmt.Value)
+				matchedCall = findMatchingCall(stmt.Value)
 			case *ast.IfStmt:
 				// Handle if x := call(); condition and if call() { }
-				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
-					needsInstrumentation = true
-				} else if hasMatchingCall(stmt.Cond) {
-					needsInstrumentation = true
+				if stmt.Init != nil {
+					matchedCall = findMatchingCall(stmt.Init)
+				}
+				if matchedCall == nil && stmt.Cond != nil {
+					matchedCall = findMatchingCall(stmt.Cond)
 				}
 			case *ast.ForStmt:
 				// Handle for i := call(); condition; post
-				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
-					needsInstrumentation = true
-				} else if stmt.Cond != nil && hasMatchingCall(stmt.Cond) {
-					needsInstrumentation = true
+				if stmt.Init != nil {
+					matchedCall = findMatchingCall(stmt.Init)
+				}
+				if matchedCall == nil && stmt.Cond != nil {
+					matchedCall = findMatchingCall(stmt.Cond)
 				}
 				// Post statement handled separately in recursion section
 			case *ast.RangeStmt:
 				// Handle for x := range call()
-				needsInstrumentation = hasMatchingCall(stmt.X)
+				matchedCall = findMatchingCall(stmt.X)
 			case *ast.SwitchStmt:
 				// Handle switch x := call(); x and switch call() { }
-				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
-					needsInstrumentation = true
-				} else if stmt.Tag != nil && hasMatchingCall(stmt.Tag) {
-					needsInstrumentation = true
+				if stmt.Init != nil {
+					matchedCall = findMatchingCall(stmt.Init)
+				}
+				if matchedCall == nil && stmt.Tag != nil {
+					matchedCall = findMatchingCall(stmt.Tag)
 				}
 			case *ast.TypeSwitchStmt:
 				// Handle switch x := call().(type) and switch call().(type) { }
-				if stmt.Init != nil && hasMatchingCall(stmt.Init) {
-					needsInstrumentation = true
-				} else if hasMatchingCall(stmt.Assign) {
-					needsInstrumentation = true
+				if stmt.Init != nil {
+					matchedCall = findMatchingCall(stmt.Init)
+				}
+				if matchedCall == nil {
+					matchedCall = findMatchingCall(stmt.Assign)
 				}
 			case *ast.SelectStmt:
 				// Handle select { case ch <- call(): ... }
 				// Check all comm clauses
 				for _, commStmt := range stmt.Body.List {
 					if cc, ok := commStmt.(*ast.CommClause); ok && cc.Comm != nil {
-						if hasMatchingCall(cc.Comm) {
-							needsInstrumentation = true
+						matchedCall = findMatchingCall(cc.Comm)
+						if matchedCall != nil {
 							break
 						}
 					}
 				}
 			}
 
-			if needsInstrumentation {
-				// Inject monitoring before this statement
+			if matchedCall != nil {
+				// Inject monitoring before this statement, capturing only the call arguments
 				pointID, err := m.nextPointId()
 				if err != nil {
 					return err
 				}
 				pointIDs = append(pointIDs, pointID)
 
-				// Get visible declarations at this point
-				decls := visibleDeclsBefore(funcDecl, st.Pos())
-
-				// Build instrumentation: SendLensPointStateMessage(pointID, ...)
-				instrStmt, err := buildCallInstrumentation(&buf, pointID, decls)
+				// Build instrumentation capturing only the matched call's arguments
+				instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, matchedCall)
 				if err != nil {
 					return err
 				}
@@ -737,19 +748,20 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 				}
 			case *ast.ForStmt:
 				// If Post contains a matching call, inject at the end of loop body
-				if s.Post != nil && hasMatchingCall(s.Post) {
-					pointID, err := m.nextPointId()
-					if err != nil {
-						return err
+				if s.Post != nil {
+					if postCall := findMatchingCall(s.Post); postCall != nil {
+						pointID, err := m.nextPointId()
+						if err != nil {
+							return err
+						}
+						pointIDs = append(pointIDs, pointID)
+						instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, postCall)
+						if err != nil {
+							return err
+						}
+						// Add instrumentation at the end of the loop body
+						s.Body.List = append(s.Body.List, instrStmt)
 					}
-					pointIDs = append(pointIDs, pointID)
-					decls := visibleDeclsBefore(funcDecl, s.Post.Pos())
-					instrStmt, err := buildCallInstrumentation(&buf, pointID, decls)
-					if err != nil {
-						return err
-					}
-					// Add instrumentation at the end of the loop body
-					s.Body.List = append(s.Body.List, instrStmt)
 				}
 				if err := rewriteBlock(s.Body); err != nil {
 					return err
@@ -810,17 +822,20 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	return pointIDs, nil
 }
 
-// buildCallInstrumentation creates a statement that sends field state to the monitoring server.
-func buildCallInstrumentation(buf *bytes.Buffer, pointID int, decls []declInfo) (ast.Stmt, error) {
-	// Build snapshots of all visible variables
-	snaps := make([]ast.Expr, 0, len(decls))
-	seen := make(map[string]bool, len(decls))
-	for _, d := range decls {
-		if d.ident.Name == literalNil || seen[d.ident.Name] {
-			continue
-		}
-		seen[d.ident.Name] = true
-		snaps = append(snaps, makeSnapshotLit(d.ident.Name, ast.NewIdent(d.ident.Name)))
+// buildCallInstrumentationWithArgs creates a statement that sends only the call's argument values to the monitoring server.
+// This reduces memory overhead by capturing only the parameters passed to the call rather than all visible variables.
+//
+// Note: In Go's AST, variadic arguments with ... (e.g., append(slice, elements...)) are represented with
+// CallExpr.Ellipsis field set to the position of the ... token, not as an ast.Ellipsis node in the Args.
+// The arguments themselves are just regular expressions, so we capture them as-is.
+func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.CallExpr) (ast.Stmt, error) {
+	// Build snapshots only for the call's arguments
+	snaps := make([]ast.Expr, 0, len(call.Args))
+	for i, arg := range call.Args {
+		argName := fmt.Sprintf("%s%d", syntheticFieldNamePrefixArg, i)
+		// Capture the argument expression as-is
+		// Note: Ellipsis in calls (e.g., nums...) is indicated by CallExpr.Ellipsis, not in the arg itself
+		snaps = append(snaps, makeSnapshotLit(argName, arg))
 	}
 	return makeSendLensPointStateMessageStmt(buf, pointID, snaps)
 }
@@ -1217,6 +1232,8 @@ func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 		name = strings.Replace(name, syntheticFieldNamePrefixReturn, "ret", 1)
 	} else if strings.HasPrefix(name, syntheticFieldNamePrefixRecursive) {
 		name = strings.Replace(name, syntheticFieldNamePrefixRecursive, "rec", 1)
+	} else if strings.HasPrefix(name, syntheticFieldNamePrefixArg) {
+		name = strings.Replace(name, syntheticFieldNamePrefixArg, "arg", 1)
 	}
 	return &ast.CompositeLit{
 		Type: ast.NewIdent("LensMonitorFieldSnapshot"),
