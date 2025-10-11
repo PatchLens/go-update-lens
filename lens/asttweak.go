@@ -35,6 +35,7 @@ const (
 	syntheticFieldNamePrefixReturn    = "lenSyntheticRet"
 	syntheticFieldNamePrefixRecursive = "lenSyntheticRec"
 	syntheticFieldNamePrefixArg       = "lenSyntheticArg"
+	syntheticFieldNamePrefixReceiver  = "lenSyntheticRecv"
 	literalNil                        = "nil"
 )
 
@@ -610,12 +611,23 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	} else if hasPatchlensMarker(funcDecl, modificationMarker) {
 		return []int{}, nil // already inserted
 	}
+	filePackageNames := make(map[string]bool, len(fileNode.Imports))
+	for _, imp := range fileNode.Imports {
+		if imp.Name != nil {
+			filePackageNames[imp.Name.Name] = true // Aliased import: import alias "path"
+		} else { // else, regular import: extract package name from path
+			path := strings.Trim(imp.Path.Value, `"`)
+			if idx := strings.LastIndex(path, "/"); idx != -1 {
+				filePackageNames[path[idx+1:]] = true
+			} else {
+				filePackageNames[path] = true
+			}
+		}
+	}
 
 	var pointIDs []int
 	var buf bytes.Buffer
-
-	// Helper to find a matching call in a node (single traversal)
-	// Returns the matched CallExpr or nil if not found
+	// Helper to find a matching call in a node, or nil if not found
 	findMatchingCall := func(node ast.Node) *ast.CallExpr {
 		var matchedCall *ast.CallExpr
 		ast.Inspect(node, func(n ast.Node) bool {
@@ -713,7 +725,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 				pointIDs = append(pointIDs, pointID)
 
 				// Build instrumentation capturing only the matched call's arguments
-				instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, matchedCall)
+				instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, matchedCall, filePackageNames)
 				if err != nil {
 					return err
 				}
@@ -755,7 +767,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 							return err
 						}
 						pointIDs = append(pointIDs, pointID)
-						instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, postCall)
+						instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, postCall, filePackageNames)
 						if err != nil {
 							return err
 						}
@@ -822,22 +834,92 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	return pointIDs, nil
 }
 
-// buildCallInstrumentationWithArgs creates a statement that sends only the call's argument values to the monitoring server.
+// buildCallInstrumentationWithArgs creates a statement that sends the call's receiver (if any) and argument values to the monitoring server.
 // This reduces memory overhead by capturing only the parameters passed to the call rather than all visible variables.
+//
+// For method calls like obj.Method(args), the receiver (obj) is captured.
+// For complex receiver expressions like (&Foo{}).Method(args), a synthetic receiver variable is created.
+// Package function calls like fmt.Printf() do not capture the package identifier.
+//
+// All arguments are captured as synthetic variables (lenSyntheticArg<pointID>_<i>) to ensure uniqueness
+// when multiple calls are instrumented in the same function, but display as arg0, arg1, arg2, etc.
 //
 // Note: In Go's AST, variadic arguments with ... (e.g., append(slice, elements...)) are represented with
 // CallExpr.Ellipsis field set to the position of the ... token, not as an ast.Ellipsis node in the Args.
 // The arguments themselves are just regular expressions, so we capture them as-is.
-func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.CallExpr) (ast.Stmt, error) {
-	// Build snapshots only for the call's arguments
-	snaps := make([]ast.Expr, 0, len(call.Args))
-	for i, arg := range call.Args {
-		argName := fmt.Sprintf("%s%d", syntheticFieldNamePrefixArg, i)
-		// Capture the argument expression as-is
-		// Note: Ellipsis in calls (e.g., nums...) is indicated by CallExpr.Ellipsis, not in the arg itself
-		snaps = append(snaps, makeSnapshotLit(argName, arg))
+func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.CallExpr, filePackageNames map[string]bool) (ast.Stmt, error) {
+	// Build snapshots for receiver (if any) and the call's arguments
+	snaps := make([]ast.Expr, 0, len(call.Args)+1)
+	preStmts := make([]ast.Stmt, 0, 1+len(call.Args))
+
+	// Check if this is a method call (has a receiver)
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.X != nil {
+		// sel.X is the receiver expression
+		if ident, isSimpleIdent := sel.X.(*ast.Ident); isSimpleIdent {
+			// Simple identifier like obj.Method() or fmt.Printf()
+			// Only capture if it's receiver, not an imported package
+			if ident.Name != "_" && !filePackageNames[ident.Name] {
+				snaps = append(snaps, makeSnapshotLit(ident.Name, ident))
+			}
+		} else {
+			// Complex receiver expression like (&Foo{}).Method() or outer.inner.Method()
+			// Create a synthetic receiver variable with unique name using pointID
+			recvVarName := fmt.Sprintf("%s%d", syntheticFieldNamePrefixReceiver, pointID)
+			recvIdent := ast.NewIdent(recvVarName)
+
+			// Clone the receiver expression to avoid position issues
+			recvExpr, err := cloneExprNoPos(buf, sel.X)
+			if err != nil {
+				return nil, err
+			}
+
+			// Create assignment: lenSyntheticRecv<pointID> := <receiver expr>
+			preStmts = append(preStmts, &ast.AssignStmt{
+				Lhs: []ast.Expr{recvIdent},
+				Tok: token.DEFINE,
+				Rhs: []ast.Expr{recvExpr},
+			})
+			// Display name is always "recv" regardless of pointID
+			snaps = append(snaps, makeSnapshotLitWithCustomName("recv", recvIdent))
+		}
 	}
-	return makeSendLensPointStateMessageStmt(buf, pointID, snaps)
+
+	// Build snapshots for the call's arguments
+	for i, arg := range call.Args {
+		// Always create synthetic variable with unique name using pointID
+		argVarName := fmt.Sprintf("%s%d_%d", syntheticFieldNamePrefixArg, pointID, i)
+		argIdent := ast.NewIdent(argVarName)
+		argDisplayName := fmt.Sprintf("arg%d", i)
+
+		// Clone the argument expression to avoid position issues
+		argExpr, err := cloneExprNoPos(buf, arg)
+		if err != nil {
+			return nil, err
+		}
+
+		// Create assignment: lenSyntheticArg<pointID>_<i> := <arg expr>
+		preStmts = append(preStmts, &ast.AssignStmt{
+			Lhs: []ast.Expr{argIdent},
+			Tok: token.DEFINE,
+			Rhs: []ast.Expr{argExpr},
+		})
+		// Display name is arg0, arg1, etc. regardless of pointID
+		snaps = append(snaps, makeSnapshotLitWithCustomName(argDisplayName, argIdent))
+	}
+
+	sendStmt, err := makeSendLensPointStateMessageStmt(buf, pointID, snaps)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we have pre-statements (synthetic variables), wrap everything in a block
+	if len(preStmts) > 0 {
+		return &ast.BlockStmt{
+			List: append(preStmts, sendStmt),
+		}, nil
+	}
+
+	return sendStmt, nil
 }
 
 type declInfo struct {
@@ -1225,6 +1307,9 @@ func buildImplicitReturnInstrumentation(buf *bytes.Buffer, pointID int, decls []
 	return makeSendLensPointStateMessageStmt(buf, pointID, snaps)
 }
 
+const fieldKeyName = "Name"
+const fieldKeyVal = "Val"
+
 // makeSnapshotLit builds a *ast.CompositeLit representing a LensMonitorFieldSnapshot.
 func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 	// we use long field names to avoid conflicts, but want to communicate concise names
@@ -1234,16 +1319,36 @@ func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 		name = strings.Replace(name, syntheticFieldNamePrefixRecursive, "rec", 1)
 	} else if strings.HasPrefix(name, syntheticFieldNamePrefixArg) {
 		name = strings.Replace(name, syntheticFieldNamePrefixArg, "arg", 1)
+	} else if strings.HasPrefix(name, syntheticFieldNamePrefixReceiver) {
+		name = strings.Replace(name, syntheticFieldNamePrefixReceiver, "recv", 1)
 	}
 	return &ast.CompositeLit{
 		Type: ast.NewIdent("LensMonitorFieldSnapshot"),
 		Elts: []ast.Expr{
 			&ast.KeyValueExpr{
-				Key:   ast.NewIdent("Name"),
+				Key:   ast.NewIdent(fieldKeyName),
 				Value: &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(name)},
 			},
 			&ast.KeyValueExpr{
-				Key:   ast.NewIdent("Val"),
+				Key:   ast.NewIdent(fieldKeyVal),
+				Value: val,
+			},
+		},
+	}
+}
+
+// makeSnapshotLitWithCustomName builds a *ast.CompositeLit with an explicit display name.
+// Unlike makeSnapshotLit, this does not perform any prefix-based name transformations.
+func makeSnapshotLitWithCustomName(displayName string, val ast.Expr) ast.Expr {
+	return &ast.CompositeLit{
+		Type: ast.NewIdent("LensMonitorFieldSnapshot"),
+		Elts: []ast.Expr{
+			&ast.KeyValueExpr{
+				Key:   ast.NewIdent(fieldKeyName),
+				Value: &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(displayName)},
+			},
+			&ast.KeyValueExpr{
+				Key:   ast.NewIdent(fieldKeyVal),
 				Value: val,
 			},
 		},

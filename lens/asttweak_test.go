@@ -1653,17 +1653,56 @@ func TestBuildCallInstrumentationWithArgs(t *testing.T) {
 			callExpr, ok := call.(*ast.CallExpr)
 			require.True(t, ok, "Expected CallExpr")
 
+			// Build a file node with fmt import for proper package detection
+			const fileSrc = `package test
+import "fmt"
+`
+			fset := token.NewFileSet()
+			fileNode, err := parser.ParseFile(fset, "", fileSrc, 0)
+			require.NoError(t, err)
+
+			// Build package names map from file node
+			filePackageNames := make(map[string]bool)
+			for _, imp := range fileNode.Imports {
+				if imp.Name != nil {
+					filePackageNames[imp.Name.Name] = true
+				} else {
+					path := strings.Trim(imp.Path.Value, `"`)
+					if idx := strings.LastIndex(path, "/"); idx != -1 {
+						filePackageNames[path[idx+1:]] = true
+					} else {
+						filePackageNames[path] = true
+					}
+				}
+			}
+
 			// Build instrumentation
 			var buf bytes.Buffer
-			stmt, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr)
+			stmt, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, filePackageNames)
 			require.NoError(t, err)
 			require.NotNil(t, stmt)
 
-			// Verify it's an ExprStmt containing a CallExpr
-			exprStmt, ok := stmt.(*ast.ExprStmt)
-			require.True(t, ok)
-			monitorCall, ok := exprStmt.X.(*ast.CallExpr)
-			require.True(t, ok)
+			// Extract the monitoring call
+			// When there are arguments, we get a BlockStmt with synthetic variable assignments
+			// When there are no arguments, we get a direct ExprStmt
+			var monitorCall *ast.CallExpr
+			if tc.expectedCount > 0 {
+				// Expect BlockStmt for calls with arguments (due to synthetic variable assignments)
+				blk, ok := stmt.(*ast.BlockStmt)
+				require.True(t, ok)
+				require.GreaterOrEqual(t, len(blk.List), 1)
+				// Last statement should be the send
+				exprStmt, ok := blk.List[len(blk.List)-1].(*ast.ExprStmt)
+				require.True(t, ok)
+				monitorCall, ok = exprStmt.X.(*ast.CallExpr)
+				require.True(t, ok)
+			} else {
+				// Expect ExprStmt for calls with no arguments
+				exprStmt, ok := stmt.(*ast.ExprStmt)
+				require.True(t, ok)
+				monitorCall, ok = exprStmt.X.(*ast.CallExpr)
+				require.True(t, ok)
+			}
 
 			// Verify the function being called is SendLensPointStateMessage
 			funIdent, ok := monitorCall.Fun.(*ast.Ident)
@@ -1693,7 +1732,7 @@ func TestBuildCallInstrumentationWithArgs(t *testing.T) {
 						continue
 					}
 					keyIdent, ok := kv.Key.(*ast.Ident)
-					if !ok || keyIdent.Name != "Name" {
+					if !ok || keyIdent.Name != fieldKeyName {
 						continue
 					}
 					namelit, ok := kv.Value.(*ast.BasicLit)
@@ -1716,7 +1755,7 @@ func TestBuildCallInstrumentationWithArgs(t *testing.T) {
 		require.True(t, ok)
 
 		var buf bytes.Buffer
-		stmt, err := buildCallInstrumentationWithArgs(&buf, 1, callExpr)
+		stmt, err := buildCallInstrumentationWithArgs(&buf, 1, callExpr, nil)
 		require.NoError(t, err)
 
 		// Format the statement to verify it's valid Go code
@@ -1783,7 +1822,7 @@ func TestMakeSnapshotLitWithArgPrefix(t *testing.T) {
 					continue
 				}
 				keyIdent, ok := kv.Key.(*ast.Ident)
-				if !ok || keyIdent.Name != "Name" {
+				if !ok || keyIdent.Name != fieldKeyName {
 					continue
 				}
 				namelit, ok := kv.Value.(*ast.BasicLit)
@@ -1802,6 +1841,7 @@ func TestMakeSnapshotLitWithArgPrefix(t *testing.T) {
 func TestInjectFuncPointBeforeCallArgCapture(t *testing.T) {
 	t.Parallel()
 
+	const monitorFuncName = "SendLensPointStateMessage"
 	// Integration test: verify that InjectFuncPointBeforeCall uses the arg naming convention
 	src := `package testpkg
 import "fmt"
@@ -1842,7 +1882,7 @@ func ProcessData(x, y int) {
 	modifiedStr := string(modifiedSrc)
 
 	// Verify the monitoring call was inserted
-	assert.Contains(t, modifiedStr, "SendLensPointStateMessage")
+	assert.Contains(t, modifiedStr, monitorFuncName)
 
 	// Parse the modified file to verify argument naming
 	fset := token.NewFileSet()
@@ -1853,21 +1893,21 @@ func ProcessData(x, y int) {
 	var foundMonitoringCall bool
 	ast.Inspect(modFile, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "SendLensPointStateMessage" {
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == monitorFuncName {
 				foundMonitoringCall = true
 
 				// Verify arguments (should have point ID + 3 snapshots for fmt.Printf args)
 				// Point ID + arg0 (format string) + arg1 (x) + arg2 (y)
+				// fmt is not captured because it's an imported package
 				assert.NotEmpty(t, call.Args)
 
-				// Check that snapshots use "arg" naming
+				// Check that snapshots are only arguments
 				buf := bytes.Buffer{}
 				for i := 1; i < len(call.Args); i++ {
 					buf.Reset()
 					err := format.Node(&buf, token.NewFileSet(), call.Args[i])
 					require.NoError(t, err)
 					snapshot := buf.String()
-					// Should contain "arg" in the name field
 					assert.Contains(t, snapshot, fmt.Sprintf("arg%d", i-1))
 				}
 				return false
@@ -1877,4 +1917,362 @@ func ProcessData(x, y int) {
 	})
 
 	assert.True(t, foundMonitoringCall)
+}
+
+func TestInjectFuncPointBeforeCallReceiverCapture(t *testing.T) {
+	t.Parallel()
+
+	const testMethodDoWork = "DoWork"
+
+	testCases := []struct {
+		name             string
+		src              string
+		funcName         string
+		predicate        func(*ast.CallExpr) bool
+		expectedReceiver string // Expected receiver name in snapshots
+		expectSynthetic  bool   // Whether to expect synthetic receiver
+	}{
+		{
+			name: "simple_receiver",
+			src: `package testpkg
+
+type MyStruct struct {
+	Value int
+}
+
+func (m *MyStruct) DoWork() {}
+
+func ProcessData() {
+	obj := &MyStruct{Value: 42}
+	obj.DoWork()
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					return sel.Sel.Name == testMethodDoWork
+				}
+				return false
+			},
+			expectedReceiver: "obj",
+			expectSynthetic:  false,
+		},
+		{
+			name: "complex_receiver",
+			src: `package testpkg
+
+type MyStruct struct {
+	Value int
+}
+
+func (m *MyStruct) DoWork() {}
+
+func ProcessData() {
+	(&MyStruct{Value: 42}).DoWork()
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					return sel.Sel.Name == testMethodDoWork
+				}
+				return false
+			},
+			expectedReceiver: "recv",
+			expectSynthetic:  true,
+		},
+		{
+			name: "method_with_args",
+			src: `package testpkg
+
+type MyStruct struct {
+	Value int
+}
+
+func (m *MyStruct) Process(x, y int) {}
+
+func ProcessData() {
+	obj := &MyStruct{Value: 10}
+	obj.Process(1, 2)
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					return sel.Sel.Name == "Process"
+				}
+				return false
+			},
+			expectedReceiver: "obj",
+			expectSynthetic:  false,
+		},
+		{
+			name: "chained_receiver",
+			src: `package testpkg
+
+type Inner struct {
+	Value int
+}
+
+func (i *Inner) DoWork() {}
+
+type Outer struct {
+	Inner *Inner
+}
+
+func ProcessData() {
+	outer := &Outer{Inner: &Inner{Value: 5}}
+	outer.Inner.DoWork()
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					return sel.Sel.Name == testMethodDoWork
+				}
+				return false
+			},
+			expectedReceiver: "recv",
+			expectSynthetic:  true,
+		},
+		{
+			name: "dot_import_package_function",
+			src: `package testpkg
+import . "strings"
+
+func ProcessData() {
+	// ToUpper is from dot-imported "strings" package
+	// Should NOT be captured as receiver since it's a package function
+	result := ToUpper("test")
+	_ = result
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) bool {
+				// Match calls to ToUpper (from dot-imported strings package)
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					return ident.Name == "ToUpper"
+				}
+				return false
+			},
+			expectedReceiver: "", // No receiver should be captured for package functions
+			expectSynthetic:  false,
+		},
+	}
+
+	const monitorFuncName = "SendLensPointStateMessage"
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, "test.go")
+			require.NoError(t, os.WriteFile(filePath, []byte(tc.src), 0o644))
+
+			modifier := &ASTModifier{}
+			fn := Function{
+				FunctionIdent: "testpkg:" + tc.funcName,
+				FunctionName:  tc.funcName,
+				PackageName:   "testpkg",
+				FilePath:      filePath,
+			}
+
+			pointIDs, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
+			require.NoError(t, err)
+			require.Len(t, pointIDs, 1)
+
+			require.NoError(t, modifier.CommitFile(filePath))
+
+			// Read and parse modified file
+			modifiedSrc, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			modifiedStr := string(modifiedSrc)
+
+			// Verify monitoring call was inserted
+			assert.Contains(t, modifiedStr, monitorFuncName)
+
+			// If synthetic receiver expected, verify assignment was created
+			if tc.expectSynthetic {
+				assert.Contains(t, modifiedStr, syntheticFieldNamePrefixReceiver+"0 := ")
+			}
+
+			fset := token.NewFileSet()
+			modFile, err := parser.ParseFile(fset, filePath, nil, 0)
+			require.NoError(t, err)
+
+			// Find the monitoring call and verify receiver capture
+			var foundMonitoringCall bool
+			ast.Inspect(modFile, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == monitorFuncName {
+						foundMonitoringCall = true
+
+						// First argument is always point ID
+						require.GreaterOrEqual(t, len(call.Args), 1)
+
+						if tc.expectedReceiver != "" {
+							// When receiver is expected, verify it's captured
+							require.GreaterOrEqual(t, len(call.Args), 2)
+
+							// Format the receiver snapshot
+							var buf bytes.Buffer
+							err := format.Node(&buf, token.NewFileSet(), call.Args[1])
+							require.NoError(t, err)
+							receiverSnapshot := buf.String()
+
+							// Verify receiver name appears in snapshot
+							assert.Contains(t, receiverSnapshot, tc.expectedReceiver)
+						} else {
+							// When no receiver expected (dot import, package function),
+							// verify the first snapshot (if any) is NOT a receiver but an argument
+							var buf bytes.Buffer
+							err := format.Node(&buf, token.NewFileSet(), call.Args[1])
+							require.NoError(t, err)
+							firstSnapshot := buf.String()
+
+							// Should be arg0, not a receiver
+							assert.Contains(t, firstSnapshot, "arg0")
+						}
+
+						return false
+					}
+				}
+				return true
+			})
+
+			assert.True(t, foundMonitoringCall)
+		})
+	}
+}
+
+func TestBuildCallInstrumentationWithReceiver(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name             string
+		callExpr         string
+		expectedReceiver string // Empty if no receiver expected
+		expectSynthetic  bool
+	}{
+		{
+			name:             "simple_receiver",
+			callExpr:         "obj.Method(x, y)",
+			expectedReceiver: "obj",
+			expectSynthetic:  false,
+		},
+		{
+			name:             "package_function",
+			callExpr:         "pkg.Function(x, y)",
+			expectedReceiver: "",
+			expectSynthetic:  false,
+		},
+		{
+			name:             "no_receiver",
+			callExpr:         "Function(x, y)",
+			expectedReceiver: "",
+			expectSynthetic:  false,
+		},
+		{
+			name:             "complex_receiver",
+			callExpr:         "getObj().Method(x)",
+			expectedReceiver: "recv",
+			expectSynthetic:  true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			call, err := parser.ParseExpr(tc.callExpr)
+			require.NoError(t, err)
+			callExpr, ok := call.(*ast.CallExpr)
+			require.True(t, ok)
+
+			var buf bytes.Buffer
+			stmt, err := buildCallInstrumentationWithArgs(&buf, 99, callExpr, nil)
+			require.NoError(t, err)
+			require.NotNil(t, stmt)
+
+			// All test cases have arguments, so all should produce BlockStmt
+			blk, ok := stmt.(*ast.BlockStmt)
+			require.True(t, ok)
+			require.GreaterOrEqual(t, len(blk.List), 1)
+
+			// If synthetic receiver expected, verify the receiver assignment
+			if tc.expectSynthetic {
+				require.GreaterOrEqual(t, len(blk.List), 2, "Should have receiver assignment and send statement")
+				// First statement should be receiver assignment
+				assign, ok := blk.List[0].(*ast.AssignStmt)
+				require.True(t, ok, "First statement should be assignment")
+				require.Len(t, assign.Lhs, 1)
+				ident, ok := assign.Lhs[0].(*ast.Ident)
+				require.True(t, ok)
+				assert.Contains(t, ident.Name, syntheticFieldNamePrefixReceiver)
+			}
+
+			// Extract the monitoring call from the last statement
+			exprStmt, ok := blk.List[len(blk.List)-1].(*ast.ExprStmt)
+			require.True(t, ok)
+			monitorCall, ok := exprStmt.X.(*ast.CallExpr)
+			require.True(t, ok)
+
+			// Verify function name
+			funIdent, ok := monitorCall.Fun.(*ast.Ident)
+			require.True(t, ok)
+			assert.Equal(t, "SendLensPointStateMessage", funIdent.Name)
+
+			// Count snapshots (excluding point ID)
+			snapshotCount := len(monitorCall.Args) - 1
+
+			if tc.expectedReceiver != "" {
+				// Should have receiver + arguments
+				require.GreaterOrEqual(t, snapshotCount, 1)
+
+				// First snapshot should be receiver
+				composite, ok := monitorCall.Args[1].(*ast.CompositeLit)
+				require.True(t, ok)
+
+				// Extract Name field
+				var receiverName string
+				for _, elt := range composite.Elts {
+					kv, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					keyIdent, ok := kv.Key.(*ast.Ident)
+					if !ok || keyIdent.Name != fieldKeyName {
+						continue
+					}
+					namelit, ok := kv.Value.(*ast.BasicLit)
+					require.True(t, ok)
+					receiverName, err = strconv.Unquote(namelit.Value)
+					require.NoError(t, err)
+					break
+				}
+
+				assert.Equal(t, tc.expectedReceiver, receiverName)
+			}
+		})
+	}
+}
+
+func TestMakeSnapshotLitWithReceiverPrefix(t *testing.T) {
+	t.Parallel()
+
+	snapshot := makeSnapshotLit("lenSyntheticRecv0", ast.NewIdent("value"))
+
+	composite, ok := snapshot.(*ast.CompositeLit)
+	require.True(t, ok)
+
+	var nameValue string
+	for _, elt := range composite.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		keyIdent, ok := kv.Key.(*ast.Ident)
+		if !ok || keyIdent.Name != fieldKeyName {
+			continue
+		}
+		namelit, ok := kv.Value.(*ast.BasicLit)
+		require.True(t, ok)
+		var err error
+		nameValue, err = strconv.Unquote(namelit.Value)
+		require.NoError(t, err)
+		break
+	}
+
+	assert.Equal(t, "recv0", nameValue)
 }
