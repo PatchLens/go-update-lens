@@ -18,6 +18,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func countFunctionCalls(t *testing.T, src []byte, funcName string) int {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", src, 0)
+	require.NoError(t, err)
+
+	var count int
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == funcName {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
 func TestDetectPackageName(t *testing.T) {
 	t.Parallel()
 
@@ -1441,7 +1462,7 @@ func ProcessData() {
 				return false
 			},
 			expectedPoints: 1,
-			expectedCalls:  map[string]int{"fmt.Sprintf": 2, "fmt.Println": 1},
+			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
 		},
 		{
 			name: "call_in_for_condition",
@@ -1678,31 +1699,16 @@ import "fmt"
 
 			// Build instrumentation
 			var buf bytes.Buffer
-			stmt, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, filePackageNames)
+			stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, filePackageNames)
 			require.NoError(t, err)
-			require.NotNil(t, stmt)
+			require.NotEmpty(t, stmts)
 
-			// Extract the monitoring call
-			// When there are arguments, we get a BlockStmt with synthetic variable assignments
-			// When there are no arguments, we get a direct ExprStmt
-			var monitorCall *ast.CallExpr
-			if tc.expectedCount > 0 {
-				// Expect BlockStmt for calls with arguments (due to synthetic variable assignments)
-				blk, ok := stmt.(*ast.BlockStmt)
-				require.True(t, ok)
-				require.GreaterOrEqual(t, len(blk.List), 1)
-				// Last statement should be the send
-				exprStmt, ok := blk.List[len(blk.List)-1].(*ast.ExprStmt)
-				require.True(t, ok)
-				monitorCall, ok = exprStmt.X.(*ast.CallExpr)
-				require.True(t, ok)
-			} else {
-				// Expect ExprStmt for calls with no arguments
-				exprStmt, ok := stmt.(*ast.ExprStmt)
-				require.True(t, ok)
-				monitorCall, ok = exprStmt.X.(*ast.CallExpr)
-				require.True(t, ok)
-			}
+			// Extract the monitoring call (always the last statement returned)
+			monitorStmt := stmts[len(stmts)-1]
+			exprStmt, ok := monitorStmt.(*ast.ExprStmt)
+			require.True(t, ok)
+			monitorCall, ok := exprStmt.X.(*ast.CallExpr)
+			require.True(t, ok)
 
 			// Verify the function being called is SendLensPointStateMessage
 			funIdent, ok := monitorCall.Fun.(*ast.Ident)
@@ -1755,12 +1761,17 @@ import "fmt"
 		require.True(t, ok)
 
 		var buf bytes.Buffer
-		stmt, err := buildCallInstrumentationWithArgs(&buf, 1, callExpr, nil)
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 1, callExpr, nil)
 		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
 
-		// Format the statement to verify it's valid Go code
+		// Format the statements to verify they're valid Go code
 		buf.Reset()
-		err = format.Node(&buf, token.NewFileSet(), stmt)
+		formatNode := stmts[0]
+		if len(stmts) > 1 {
+			formatNode = &ast.BlockStmt{List: stmts}
+		}
+		err = format.Node(&buf, token.NewFileSet(), formatNode)
 		require.NoError(t, err)
 
 		generated := buf.String()
@@ -1917,6 +1928,282 @@ func ProcessData(x, y int) {
 	})
 
 	assert.True(t, foundMonitoringCall)
+
+	t.Run("arg_side_effect_single_eval", func(t *testing.T) {
+		t.Parallel()
+
+		src := `package testpkg
+
+var counter int
+
+func first(x int) int { return x }
+
+func next() int {
+	counter++
+	return counter
+}
+
+func ProcessData() int {
+	return first(next())
+}
+`
+
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+		modifier := &ASTModifier{}
+		fn := Function{
+			FunctionIdent: "testpkg:ProcessData",
+			FunctionName:  "ProcessData",
+			PackageName:   "testpkg",
+			FilePath:      filePath,
+		}
+
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return ident.Name == "first"
+			}
+			return false
+		})
+		require.NoError(t, err)
+		require.NoError(t, modifier.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "next"))
+		code := string(modifiedSrc)
+		assert.Contains(t, code, "lenSyntheticArg0_0 := next()")
+		assert.Contains(t, code, "first(lenSyntheticArg0_0)")
+	})
+
+	t.Run("for_post_side_effect_single_eval", func(t *testing.T) {
+		t.Parallel()
+
+		src := `package testpkg
+
+var counter int
+
+func helper(int) {}
+
+func next() int {
+	counter++
+	return counter
+}
+
+func Process() {
+	for i := 0; i < 2; helper(next()) {
+		i++
+	}
+}
+`
+
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+		modifier := &ASTModifier{}
+		fn := Function{
+			FunctionIdent: "testpkg:Process",
+			FunctionName:  "Process",
+			PackageName:   "testpkg",
+			FilePath:      filePath,
+		}
+
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return ident.Name == "helper"
+			}
+			return false
+		})
+		require.NoError(t, err)
+		require.NoError(t, modifier.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "next"))
+		code := string(modifiedSrc)
+		assert.Contains(t, code, "for i := 0; i < 2; func() {")
+		assert.Contains(t, code, "helper(lenSyntheticArg0_0)")
+	})
+
+	t.Run("multiple_args_side_effects", func(t *testing.T) {
+		t.Parallel()
+
+		src := `package testpkg
+
+var counter int
+
+func addThree(a, b, c int) int { return a + b + c }
+
+func next() int {
+	counter++
+	return counter
+}
+
+func ProcessData() int {
+	return addThree(next(), next(), next())
+}
+`
+
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+		modifier := &ASTModifier{}
+		fn := Function{
+			FunctionIdent: "testpkg:ProcessData",
+			FunctionName:  "ProcessData",
+			PackageName:   "testpkg",
+			FilePath:      filePath,
+		}
+
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return ident.Name == "addThree"
+			}
+			return false
+		})
+		require.NoError(t, err)
+		require.NoError(t, modifier.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		// Each next() should only be called once and stored in separate temp variables
+		assert.Equal(t, 3, countFunctionCalls(t, modifiedSrc, "next"))
+		code := string(modifiedSrc)
+		assert.Contains(t, code, "lenSyntheticArg0_0 := next()")
+		assert.Contains(t, code, "lenSyntheticArg0_1 := next()")
+		assert.Contains(t, code, "lenSyntheticArg0_2 := next()")
+		assert.Contains(t, code, "addThree(lenSyntheticArg0_0, lenSyntheticArg0_1, lenSyntheticArg0_2)")
+	})
+
+	t.Run("variadic_side_effects", func(t *testing.T) {
+		t.Parallel()
+
+		src := `package testpkg
+import "fmt"
+
+var counter int
+
+func getFormat() string {
+	counter++
+	return "format"
+}
+
+func getArg() int {
+	counter++
+	return counter
+}
+
+func ProcessData() {
+	fmt.Printf(getFormat(), getArg(), getArg())
+}
+`
+
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+		modifier := &ASTModifier{}
+		fn := Function{
+			FunctionIdent: "testpkg:ProcessData",
+			FunctionName:  "ProcessData",
+			PackageName:   "testpkg",
+			FilePath:      filePath,
+		}
+
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if x, ok := sel.X.(*ast.Ident); ok {
+					return x.Name == "fmt" && sel.Sel.Name == "Printf"
+				}
+			}
+			return false
+		})
+		require.NoError(t, err)
+		require.NoError(t, modifier.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		// Each function should only be called once
+		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "getFormat"))
+		assert.Equal(t, 2, countFunctionCalls(t, modifiedSrc, "getArg"))
+		code := string(modifiedSrc)
+		assert.Contains(t, code, "lenSyntheticArg0_0 := getFormat()")
+		assert.Contains(t, code, "lenSyntheticArg0_1 := getArg()")
+		assert.Contains(t, code, "lenSyntheticArg0_2 := getArg()")
+		assert.Contains(t, code, "fmt.Printf(lenSyntheticArg0_0, lenSyntheticArg0_1, lenSyntheticArg0_2)")
+	})
+
+	t.Run("method_chaining_side_effects", func(t *testing.T) {
+		t.Parallel()
+
+		src := `package testpkg
+
+var counter int
+
+type Builder struct {
+	value int
+}
+
+func (b *Builder) Add(n int) *Builder {
+	b.value += n
+	return b
+}
+
+func (b *Builder) Build() int {
+	return b.value
+}
+
+func getBuilder() *Builder {
+	counter++
+	return &Builder{}
+}
+
+func getValue() int {
+	counter++
+	return counter
+}
+
+func ProcessData() int {
+	return getBuilder().Add(getValue()).Build()
+}
+`
+
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+		modifier := &ASTModifier{}
+		fn := Function{
+			FunctionIdent: "testpkg:ProcessData",
+			FunctionName:  "ProcessData",
+			PackageName:   "testpkg",
+			FilePath:      filePath,
+		}
+
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				return sel.Sel.Name == "Add"
+			}
+			return false
+		})
+		require.NoError(t, err)
+		require.NoError(t, modifier.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+		// Each function should only be called once
+		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "getBuilder"))
+		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "getValue"))
+		code := string(modifiedSrc)
+		// Receiver (getBuilder()) should be evaluated once
+		assert.Contains(t, code, "lenSyntheticRecv0 := getBuilder()")
+		// Argument (getValue()) should be evaluated once
+		assert.Contains(t, code, "lenSyntheticArg0_0 := getValue()")
+		assert.Contains(t, code, "lenSyntheticRecv0.Add(lenSyntheticArg0_0)")
+	})
 }
 
 func TestInjectFuncPointBeforeCallReceiverCapture(t *testing.T) {
@@ -1931,6 +2218,7 @@ func TestInjectFuncPointBeforeCallReceiverCapture(t *testing.T) {
 		predicate        func(*ast.CallExpr) bool
 		expectedReceiver string // Expected receiver name in snapshots
 		expectSynthetic  bool   // Whether to expect synthetic receiver
+		verify           func(*testing.T, []byte)
 	}{
 		{
 			name: "simple_receiver",
@@ -2053,6 +2341,41 @@ func ProcessData() {
 			expectedReceiver: "", // No receiver should be captured for package functions
 			expectSynthetic:  false,
 		},
+		{
+			name: "receiver_side_effect_single_eval",
+			src: `package testpkg
+
+var counter int
+
+type MyStruct struct{}
+
+func makeStruct() *MyStruct {
+	counter++
+	return &MyStruct{}
+}
+
+func (m *MyStruct) DoWork() {}
+
+func Process() {
+	makeStruct().DoWork()
+}
+`,
+			funcName: "Process",
+			predicate: func(call *ast.CallExpr) bool {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					return sel.Sel.Name == "DoWork"
+				}
+				return false
+			},
+			expectedReceiver: "recv",
+			expectSynthetic:  true,
+			verify: func(t *testing.T, src []byte) {
+				assert.Equal(t, 1, countFunctionCalls(t, src, "makeStruct"))
+				code := string(src)
+				assert.Contains(t, code, "lenSyntheticRecv0 := makeStruct()")
+				assert.Contains(t, code, "lenSyntheticRecv0.DoWork()")
+			},
+		},
 	}
 
 	const monitorFuncName = "SendLensPointStateMessage"
@@ -2083,6 +2406,10 @@ func ProcessData() {
 
 			// Verify monitoring call was inserted
 			assert.Contains(t, modifiedStr, monitorFuncName)
+
+			if tc.verify != nil {
+				tc.verify(t, modifiedSrc)
+			}
 
 			// If synthetic receiver expected, verify assignment was created
 			if tc.expectSynthetic {
@@ -2181,13 +2508,12 @@ func TestBuildCallInstrumentationWithReceiver(t *testing.T) {
 			require.True(t, ok)
 
 			var buf bytes.Buffer
-			stmt, err := buildCallInstrumentationWithArgs(&buf, 99, callExpr, nil)
+			stmts, err := buildCallInstrumentationWithArgs(&buf, 99, callExpr, nil)
 			require.NoError(t, err)
-			require.NotNil(t, stmt)
+			require.NotEmpty(t, stmts)
 
-			// All test cases have arguments, so all should produce BlockStmt
-			blk, ok := stmt.(*ast.BlockStmt)
-			require.True(t, ok)
+			// All test cases have arguments, so expect assignments plus send statement
+			blk := &ast.BlockStmt{List: stmts}
 			require.GreaterOrEqual(t, len(blk.List), 1)
 
 			// If synthetic receiver expected, verify the receiver assignment

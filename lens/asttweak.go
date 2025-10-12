@@ -717,21 +717,19 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 			}
 
 			if matchedCall != nil {
-				// Inject monitoring before this statement, capturing only the call arguments
 				pointID, err := m.nextPointId()
 				if err != nil {
 					return err
 				}
 				pointIDs = append(pointIDs, pointID)
 
-				// Build instrumentation capturing only the matched call's arguments
-				instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, matchedCall, filePackageNames)
+				preStmts, err := buildCallInstrumentationWithArgs(&buf, pointID, matchedCall, filePackageNames)
 				if err != nil {
 					return err
 				}
 
-				// Add instrumentation then the original statement
-				newStmts = append(newStmts, instrStmt, st)
+				block := &ast.BlockStmt{List: append(preStmts, st)}
+				newStmts = append(newStmts, block)
 			} else {
 				newStmts = append(newStmts, st)
 			}
@@ -759,7 +757,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 					}
 				}
 			case *ast.ForStmt:
-				// If Post contains a matching call, inject at the end of loop body
+				// If Post contains a matching call, wrap it so temps stay in scope per iteration
 				if s.Post != nil {
 					if postCall := findMatchingCall(s.Post); postCall != nil {
 						pointID, err := m.nextPointId()
@@ -767,12 +765,22 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 							return err
 						}
 						pointIDs = append(pointIDs, pointID)
-						instrStmt, err := buildCallInstrumentationWithArgs(&buf, pointID, postCall, filePackageNames)
+						preStmts, err := buildCallInstrumentationWithArgs(&buf, pointID, postCall, filePackageNames)
 						if err != nil {
 							return err
 						}
-						// Add instrumentation at the end of the loop body
-						s.Body.List = append(s.Body.List, instrStmt)
+
+						origPost := s.Post
+						blockList := append(make([]ast.Stmt, 0, len(preStmts)+1), preStmts...)
+						blockList = append(blockList, origPost)
+						s.Post = &ast.ExprStmt{
+							X: &ast.CallExpr{
+								Fun: &ast.FuncLit{
+									Type: &ast.FuncType{Params: &ast.FieldList{}},
+									Body: &ast.BlockStmt{List: blockList},
+								},
+							},
+						}
 					}
 				}
 				if err := rewriteBlock(s.Body); err != nil {
@@ -847,10 +855,10 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 // Note: In Go's AST, variadic arguments with ... (e.g., append(slice, elements...)) are represented with
 // CallExpr.Ellipsis field set to the position of the ... token, not as an ast.Ellipsis node in the Args.
 // The arguments themselves are just regular expressions, so we capture them as-is.
-func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.CallExpr, filePackageNames map[string]bool) (ast.Stmt, error) {
+func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.CallExpr, filePackageNames map[string]bool) ([]ast.Stmt, error) {
 	// Build snapshots for receiver (if any) and the call's arguments
 	snaps := make([]ast.Expr, 0, len(call.Args)+1)
-	preStmts := make([]ast.Stmt, 0, 1+len(call.Args))
+	stmts := make([]ast.Stmt, 0, len(call.Args)+2)
 
 	// Check if this is a method call (has a receiver)
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.X != nil {
@@ -866,60 +874,43 @@ func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.
 			// Create a synthetic receiver variable with unique name using pointID
 			recvVarName := fmt.Sprintf("%s%d", syntheticFieldNamePrefixReceiver, pointID)
 			recvIdent := ast.NewIdent(recvVarName)
-
-			// Clone the receiver expression to avoid position issues
-			recvExpr, err := cloneExprNoPos(buf, sel.X)
-			if err != nil {
-				return nil, err
-			}
-
-			// Create assignment: lenSyntheticRecv<pointID> := <receiver expr>
-			preStmts = append(preStmts, &ast.AssignStmt{
+			origRecv := sel.X
+			stmts = append(stmts, &ast.AssignStmt{
 				Lhs: []ast.Expr{recvIdent},
 				Tok: token.DEFINE,
-				Rhs: []ast.Expr{recvExpr},
+				Rhs: []ast.Expr{origRecv},
 			})
-			// Display name is always "recv" regardless of pointID
+			// Create a new SelectorExpr with the synthetic receiver instead of modifying the original
+			// to avoid position-related formatting issues. Use a fresh Sel identifier with no position.
+			call.Fun = &ast.SelectorExpr{
+				X:   recvIdent,
+				Sel: ast.NewIdent(sel.Sel.Name),
+			}
 			snaps = append(snaps, makeSnapshotLitWithCustomName("recv", recvIdent))
 		}
 	}
 
 	// Build snapshots for the call's arguments
-	for i, arg := range call.Args {
-		// Always create synthetic variable with unique name using pointID
+	for i := range call.Args {
+		// Create synthetic variable with unique name using pointID
 		argVarName := fmt.Sprintf("%s%d_%d", syntheticFieldNamePrefixArg, pointID, i)
 		argIdent := ast.NewIdent(argVarName)
-		argDisplayName := fmt.Sprintf("arg%d", i)
-
-		// Clone the argument expression to avoid position issues
-		argExpr, err := cloneExprNoPos(buf, arg)
-		if err != nil {
-			return nil, err
-		}
-
-		// Create assignment: lenSyntheticArg<pointID>_<i> := <arg expr>
-		preStmts = append(preStmts, &ast.AssignStmt{
+		origArg := call.Args[i]
+		stmts = append(stmts, &ast.AssignStmt{
 			Lhs: []ast.Expr{argIdent},
 			Tok: token.DEFINE,
-			Rhs: []ast.Expr{argExpr},
+			Rhs: []ast.Expr{origArg},
 		})
-		// Display name is arg0, arg1, etc. regardless of pointID
-		snaps = append(snaps, makeSnapshotLitWithCustomName(argDisplayName, argIdent))
+		call.Args[i] = argIdent
+		snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), argIdent))
 	}
 
 	sendStmt, err := makeSendLensPointStateMessageStmt(buf, pointID, snaps)
 	if err != nil {
 		return nil, err
 	}
-
-	// If we have pre-statements (synthetic variables), wrap everything in a block
-	if len(preStmts) > 0 {
-		return &ast.BlockStmt{
-			List: append(preStmts, sendStmt),
-		}, nil
-	}
-
-	return sendStmt, nil
+	stmts = append(stmts, sendStmt)
+	return stmts, nil
 }
 
 type declInfo struct {
