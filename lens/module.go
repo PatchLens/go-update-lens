@@ -121,6 +121,7 @@ func AnalyzeModuleChanges(includeTransitive bool, gomodcache, projectDir string,
 	}
 
 	checkedModules := slices.Collect(maps.Keys(visited))
+	slices.Sort(checkedModules)
 	return changedFunctions, checkedModules, nil
 }
 
@@ -146,7 +147,7 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 		log.Printf("WARN: %s is not strictly newer than %s", newVer, oldVer)
 	}
 
-	// Load pacakges from the local (cached) directories for the old and new module versions
+	// Load packages from the local (cached) directories for the old and new module versions
 	type loadModuleResult struct {
 		dir  string
 		pkgs []*packages.Package

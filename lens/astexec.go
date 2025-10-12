@@ -181,7 +181,7 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 		testFunc := func() error {
 			srv := <-srvChan
 			defer func() { srvChan <- srv }()
-			var stableResults map[string][]CallFrame
+			var stableResults *monitorStableResults
 			if stableResultsStorage != nil {
 				if stableResultBlob, found, err := stableResultsStorage.LoadState(tFunc.FunctionIdent); err != nil {
 					return fmt.Errorf("failed to load stable results: %w", err)
@@ -190,7 +190,10 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 					if err := stableTestResult.UnmarshalMsgpack(stableResultBlob); err != nil {
 						return fmt.Errorf("failed to unmarshal stable results: %w", err)
 					}
-					stableResults = stableTestResult.CallerResults
+					stableResults = &monitorStableResults{
+						caller:    stableTestResult.CallerResults,
+						extension: stableTestResult.ExtensionFrames,
+					}
 				} else {
 					log.Printf("%sUnexpected missing stable results for function: %s", ErrorLogPrefix, tFunc.FunctionName)
 				}
@@ -439,7 +442,7 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 }
 
 func runMonitoredTest(env []string, goroot, projectDir string, srv *astServer, execOutput *bytes.Buffer,
-	stableResults map[string][]CallFrame,
+	stableResults *monitorStableResults,
 	projectStatePointIdToIdent, projectPanicPointIdToIdent,
 	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string, tFunc *TestFunction) (string, TestResult, int, []*string, error) {
 	pointHandler1 := newTestMonitor(stableResults, goroot, projectDir,
@@ -491,7 +494,12 @@ func cleanExecOutput(execOutput *bytes.Buffer) string {
 		strings.ReplaceAll(strings.TrimSpace(execOutput.String()), "FAIL\nexit status 1\n", ""))
 }
 
-func newTestMonitor(stableResults map[string][]CallFrame, goroot, projectDir string, projectStatePointIdToIdent, projectPanicPointIdToIdent,
+type monitorStableResults struct {
+	caller    map[string][]CallFrame
+	extension map[string][]CallFrame
+}
+
+func newTestMonitor(stableResults *monitorStableResults, goroot, projectDir string, projectStatePointIdToIdent, projectPanicPointIdToIdent,
 	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string) *testMonitor {
 	return &testMonitor{
 		stableResults:                stableResults,
@@ -522,7 +530,7 @@ type testMonitor struct {
 	// runtime config
 	goroot        string
 	projectDir    string
-	stableResults map[string][]CallFrame
+	stableResults *monitorStableResults
 
 	// runtime data
 	moduleChangesReached sync.Map      // module funcIdent -> true
@@ -669,119 +677,86 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 			collectFields(fieldMap, sf.Name, sf.Value, sf.Type, sf.Children)
 		}
 
-		// Apply stable results filtering and store in appropriate map
+		// Filter by stable results if present (memory optimization: only record fields that vary between runs)
+		applyStableFilter := func(stable map[string][]CallFrame, recorded map[string][]CallFrame) {
+			if t.stableResults == nil || stable == nil {
+				return
+			}
+			frames, ok := stable[storageKey]
+			var bb bytes.Buffer
+			if !ok {
+				for k := range fieldMap {
+					delete(fieldMap, k)
+				}
+				return
+			}
+
+			pStack := ProjectFrames(stack)
+			pKey := StackFramesKey(&bb, pStack)
+
+			var targetOccur int
+			for _, cf := range recorded[storageKey] {
+				if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
+					targetOccur++
+				}
+			}
+
+			idx := -1
+			var occ int
+			for i := range frames {
+				if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
+					if occ == targetOccur {
+						idx = i
+						break
+					}
+					occ++
+				}
+			}
+
+			if idx < 0 {
+				for k := range fieldMap {
+					delete(fieldMap, k)
+				}
+				return
+			}
+
+			allowed := frames[idx].FieldValues
+			for fname := range fieldMap {
+				if _, ok := allowed[fname]; !ok {
+					delete(fieldMap, fname)
+				}
+			}
+		}
+
+		recordedAppend := func(store map[string][]CallFrame) {
+			store[storageKey] = append(store[storageKey],
+				CallFrame{
+					FieldValues: fieldMap,
+					Stack:       stack,
+					TimeMillis:  uint32((msg.TimeNS + 500000) / 1_000_000),
+				})
+		}
+
 		if isExtension {
 			t.extensionFramesMu.Lock()
 			defer t.extensionFramesMu.Unlock()
 
-			if t.stableResults != nil { // filter by stableResults if present (memory optimization)
-				frames, ok := t.stableResults[storageKey]
-				var bb bytes.Buffer
-				if !ok {
-					for k := range fieldMap {
-						delete(fieldMap, k)
-					}
-				} else {
-					pStack := ProjectFrames(stack)
-					pKey := StackFramesKey(&bb, pStack)
-
-					var targetOccur int
-					for _, cf := range t.extensionFrames[storageKey] {
-						if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
-							targetOccur++
-						}
-					}
-
-					idx := -1
-					var occ int
-					for i := range frames {
-						if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
-							if occ == targetOccur {
-								idx = i
-								break
-							}
-							occ++
-						}
-					}
-
-					if idx >= 0 {
-						allowed := frames[idx].FieldValues
-						for fname := range fieldMap {
-							if _, ok := allowed[fname]; !ok {
-								delete(fieldMap, fname)
-							}
-						}
-					} else {
-						for k := range fieldMap {
-							delete(fieldMap, k)
-						}
-					}
-				}
+			var stable map[string][]CallFrame
+			if t.stableResults != nil {
+				stable = t.stableResults.extension
 			}
-
-			t.extensionFrames[storageKey] =
-				append(t.extensionFrames[storageKey],
-					CallFrame{
-						FieldValues: fieldMap,
-						Stack:       stack,
-						TimeMillis:  uint32((msg.TimeNS + 500000) / 1_000_000),
-					})
+			applyStableFilter(stable, t.extensionFrames)
+			recordedAppend(t.extensionFrames)
 		} else {
 			t.callerFramesMu.Lock()
 			defer t.callerFramesMu.Unlock()
 
-			if t.stableResults != nil { // filter by stableResults if present (memory optimization)
-				frames, ok := t.stableResults[storageKey]
-				var bb bytes.Buffer
-				if !ok {
-					for k := range fieldMap {
-						delete(fieldMap, k)
-					}
-				} else {
-					pStack := ProjectFrames(stack)
-					pKey := StackFramesKey(&bb, pStack)
-
-					var targetOccur int
-					for _, cf := range t.callerFrames[storageKey] {
-						if StackFramesKey(&bb, ProjectFrames(cf.Stack)) == pKey {
-							targetOccur++
-						}
-					}
-
-					idx := -1
-					var occ int
-					for i := range frames {
-						if StackFramesKey(&bb, ProjectFrames(frames[i].Stack)) == pKey {
-							if occ == targetOccur {
-								idx = i
-								break
-							}
-							occ++
-						}
-					}
-
-					if idx >= 0 {
-						allowed := frames[idx].FieldValues
-						for fname := range fieldMap {
-							if _, ok := allowed[fname]; !ok {
-								delete(fieldMap, fname)
-							}
-						}
-					} else {
-						for k := range fieldMap {
-							delete(fieldMap, k)
-						}
-					}
-				}
+			var stable map[string][]CallFrame
+			if t.stableResults != nil {
+				stable = t.stableResults.caller
 			}
-
-			t.callerFrames[storageKey] =
-				append(t.callerFrames[storageKey],
-					CallFrame{
-						FieldValues: fieldMap,
-						Stack:       stack,
-						TimeMillis:  uint32((msg.TimeNS + 500000) / 1_000_000),
-					})
+			applyStableFilter(stable, t.callerFrames)
+			recordedAppend(t.callerFrames)
 		}
 	}()
 }
