@@ -1265,3 +1265,274 @@ func FuzzConfigPrepareModulesValidation(f *testing.F) {
 		}
 	})
 }
+
+func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
+	t.Run("nil_hook", func(t *testing.T) {
+		t.Parallel()
+
+		provider := &DefaultCallerAnalysisProvider{
+			PostCallerAnalysis: nil,
+		}
+		config := createTestConfig(t)
+		moduleChanges := []*ModuleFunction{
+			{Function: Function{FunctionName: "Func1"}},
+		}
+
+		_, _, err := provider.PerformCallerStaticAnalysis(*config, moduleChanges)
+		require.NoError(t, err)
+	})
+
+	t.Run("hook_called", func(t *testing.T) {
+		t.Parallel()
+
+		var hookCalled bool
+		var receivedModuleChanges []*ModuleFunction
+		var receivedCallersCount, receivedReachableCount int
+		provider := &DefaultCallerAnalysisProvider{
+			PostCallerAnalysis: func(moduleChanges []*ModuleFunction,
+				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				hookCalled = true
+				receivedModuleChanges = moduleChanges
+				receivedCallersCount = len(callers)
+				receivedReachableCount = len(reachable)
+				return nil
+			},
+		}
+
+		config := createTestConfig(t)
+		moduleChanges := []*ModuleFunction{
+			{Function: Function{FunctionName: "Func1"}},
+		}
+
+		_, _, err := provider.PerformCallerStaticAnalysis(*config, moduleChanges)
+		require.NoError(t, err)
+
+		assert.True(t, hookCalled)
+		assert.Equal(t, moduleChanges, receivedModuleChanges)
+		// receivedCallersCount and receivedReachableCount may be 0 in test environment
+		assert.GreaterOrEqual(t, receivedCallersCount, 0)
+		assert.GreaterOrEqual(t, receivedReachableCount, 0)
+	})
+
+	t.Run("hook_error", func(t *testing.T) {
+		t.Parallel()
+
+		expectedErr := errors.New("hook analysis failed")
+		provider := &DefaultCallerAnalysisProvider{
+			PostCallerAnalysis: func(moduleChanges []*ModuleFunction,
+				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				return expectedErr
+			},
+		}
+		config := createTestConfig(t)
+		moduleChanges := []*ModuleFunction{
+			{Function: Function{FunctionName: "Func1"}},
+		}
+
+		_, _, err := provider.PerformCallerStaticAnalysis(*config, moduleChanges)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-caller analysis hook failed")
+		assert.Contains(t, err.Error(), expectedErr.Error())
+	})
+}
+
+func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
+	t.Run("nil_hook", func(t *testing.T) {
+		t.Parallel()
+
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+
+		// Create a simple module setup
+		modName := "example.com/testmod"
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "testmod.go"), []byte(body), 0o644))
+		}
+
+		createModule("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
+		createModule("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
+
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, nil)
+
+		require.NoError(t, err)
+		assert.NotEmpty(t, funcs)
+		assert.NotEmpty(t, checked)
+	})
+
+	t.Run("single_module", func(t *testing.T) {
+		t.Parallel()
+
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+
+		const modName = "example.com/testmod"
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "testmod.go"), []byte(body), 0o644))
+		}
+
+		// Old version has two functions
+		createModule("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\nfunc Bar() int { return 3 }\n")
+		// New version changes Foo but not Bar
+		createModule("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\nfunc Bar() int { return 3 }\n")
+
+		var receivedData []ModuleAnalysisData
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0,
+			func(allModuleData []ModuleAnalysisData) error {
+				receivedData = allModuleData
+				return nil
+			})
+
+		require.NoError(t, err)
+		require.Len(t, receivedData, 1)
+
+		data := receivedData[0]
+		// AllFunctions should have both Foo and Bar
+		assert.Len(t, data.AllFunctions, 2)
+		// ChangedFunctions should only have Foo
+		assert.Len(t, data.ChangedFunctions, 1)
+
+		// Verify ChangedFunctions is a subset of AllFunctions
+		changedNames := make(map[string]bool)
+		for _, fn := range data.ChangedFunctions {
+			changedNames[fn.FunctionName] = true
+		}
+		allNames := make(map[string]bool)
+		for _, fn := range data.AllFunctions {
+			allNames[fn.FunctionName] = true
+		}
+		for name := range changedNames {
+			assert.True(t, allNames[name])
+		}
+	})
+
+	t.Run("multiple_modules", func(t *testing.T) {
+		t.Parallel()
+
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+
+		// Create multiple modules
+		createModule := func(modName, version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "mod.go"), []byte(body), 0o644))
+		}
+
+		const modName1 = "example.com/mod1"
+		const modName2 = "example.com/mod2"
+		const modName3 = "example.com/mod3"
+		createModule(modName1, "v1.0.0", "package mod1\n\nfunc F1() int { return 1 }\n")
+		createModule(modName1, "v1.1.0", "package mod1\n\nfunc F1() int { return 2 }\n")
+		createModule(modName2, "v1.0.0", "package mod2\n\nfunc F2() int { return 3 }\n")
+		createModule(modName2, "v1.1.0", "package mod2\n\nfunc F2() int { return 4 }\n")
+		createModule(modName3, "v1.0.0", "package mod3\n\nfunc F3() int { return 5 }\n")
+		createModule(modName3, "v1.1.0", "package mod3\n\nfunc F3() int { return 6 }\n")
+		var hookCallCount int
+		var receivedData []ModuleAnalysisData
+		mods := []ModuleChange{
+			{Name: modName1, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
+			{Name: modName2, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
+			{Name: modName3, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
+		}
+		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0,
+			func(allModuleData []ModuleAnalysisData) error {
+				hookCallCount++
+				receivedData = allModuleData
+				return nil
+			})
+
+		require.NoError(t, err)
+
+		// Verify hook is called exactly once with all modules
+		assert.Equal(t, 1, hookCallCount)
+		assert.Len(t, receivedData, 3)
+
+		// Verify each module's data structure
+		for _, data := range receivedData {
+			assert.NotEmpty(t, data.ModuleChange.Name)
+			assert.NotEmpty(t, data.AllFunctions)
+			assert.NotEmpty(t, data.ChangedFunctions)
+		}
+	})
+
+	t.Run("hook_error", func(t *testing.T) {
+		t.Parallel()
+
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+
+		const modName = "example.com/testmod"
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "testmod.go"), []byte(body), 0o644))
+		}
+
+		createModule("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
+		createModule("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
+
+		expectedErr := errors.New("module analysis hook failed")
+
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0,
+			func(allModuleData []ModuleAnalysisData) error {
+				return expectedErr
+			})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-module analysis hook failed")
+		assert.Contains(t, err.Error(), expectedErr.Error())
+	})
+}
+
+func TestDefaultModuleChangeProvider_AnalyzeModuleChanges_WithHook(t *testing.T) {
+	t.Parallel()
+
+	gomodcache := t.TempDir()
+	projectDir := t.TempDir()
+
+	const modName = "example.com/testmod"
+	createModule := func(version, body string) {
+		dir := filepath.Join(gomodcache, modName+"@"+version)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		modFile := "module " + modName + "\n\ngo 1.20\n"
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "testmod.go"), []byte(body), 0o644))
+	}
+
+	createModule("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
+	createModule("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
+
+	var hookCalled bool
+	provider := &DefaultModuleChangeProvider{
+		PostModuleAnalysis: func(allModuleData []ModuleAnalysisData) error {
+			hookCalled = true
+			return nil
+		},
+	}
+
+	config := Config{
+		Gomodcache: gomodcache,
+		AbsProjDir: projectDir,
+	}
+
+	mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+	_, _, err := provider.AnalyzeModuleChanges(config, false, mods, 0)
+
+	require.NoError(t, err)
+	assert.True(t, hookCalled)
+}

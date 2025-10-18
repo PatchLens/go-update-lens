@@ -241,21 +241,72 @@ type ReportWriter interface {
 		globalMutations MutationResult) error
 }
 
+// ModuleAnalysisData contains the complete analysis data for a single module update.
+// This structure is passed to PostModuleAnalysis hooks to provide extensions with
+// access to all functions in the module (not just changed ones).
+type ModuleAnalysisData struct {
+	// ModuleChange identifies the module and versions being compared
+	ModuleChange ModuleChange
+
+	// AllFunctions contains ALL functions in the new version of the module.
+	AllFunctions []*ModuleFunction
+
+	// ChangedFunctions contains only the functions that changed between versions.
+	// This is a subset of AllFunctions.
+	ChangedFunctions []*ModuleFunction
+}
+
 // DefaultModuleChangeProvider provides the standard implementation of ModuleChangeProvider.
-type DefaultModuleChangeProvider struct{}
+type DefaultModuleChangeProvider struct {
+	// PostModuleAnalysis is an optional hook called after analyzing all module updates.
+	//
+	// The hook is called once after all modules have been analyzed, with aggregated data from all modules.
+	//
+	// Parameters:
+	//   - allModuleData: Slice of ModuleAnalysisData, one per analyzed module
+	//
+	// Returns:
+	//   - error: Any error encountered during analysis. Errors are FATAL and will stop the entire analysis.
+	PostModuleAnalysis func(allModuleData []ModuleAnalysisData) error
+}
 
 func (d *DefaultModuleChangeProvider) AnalyzeModuleChanges(config Config, analyzeExpandTransitive bool,
 	changedModules []ModuleChange, neighbourRadius int) ([]*ModuleFunction, []string, error) {
-	return AnalyzeModuleChanges(analyzeExpandTransitive, config.Gomodcache, config.AbsProjDir, changedModules, neighbourRadius)
+	return AnalyzeModuleChanges(analyzeExpandTransitive, config.Gomodcache, config.AbsProjDir, changedModules, neighbourRadius, d.PostModuleAnalysis)
 }
 
 func (d *DefaultModuleChangeProvider) Cleanup() {}
 
 // DefaultCallerAnalysisProvider provides the standard implementation of CallerAnalysisProvider.
-type DefaultCallerAnalysisProvider struct{}
+type DefaultCallerAnalysisProvider struct {
+	// PostCallerAnalysis is an optional hook called after project caller static analysis completes.
+	//
+	// The hook is called once after all project callers have been identified.
+	//
+	// Parameters:
+	//   - moduleChanges: All functions that changed in module updates
+	//   - callers: Project functions that call into changed module functions
+	//   - reachable: Map of which module changes are reachable from project code
+	//
+	// Returns:
+	//   - error: Any fatal error encountered during analysis.
+	PostCallerAnalysis func(moduleChanges []*ModuleFunction,
+		callers []*CallerFunction, reachable ReachableModuleChange) error
+}
 
 func (d *DefaultCallerAnalysisProvider) PerformCallerStaticAnalysis(config Config, moduleChanges []*ModuleFunction) ([]*CallerFunction, ReachableModuleChange, error) {
-	return CallerStaticAnalysis(moduleChanges, config.AbsProjDir)
+	callers, reachable, err := CallerStaticAnalysis(moduleChanges, config.AbsProjDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if d.PostCallerAnalysis != nil {
+		if err := d.PostCallerAnalysis(moduleChanges, callers, reachable); err != nil {
+			return nil, nil, fmt.Errorf("post-caller analysis hook failed: %w", err)
+		}
+	}
+
+	return callers, reachable, nil
 }
 
 func (d *DefaultCallerAnalysisProvider) Cleanup() {}

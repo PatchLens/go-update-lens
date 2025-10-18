@@ -90,18 +90,35 @@ func DiffModulesFromGoModFiles(oldGoModPath, newGoModPath string) ([]ModuleChang
 // AnalyzeModuleChanges loads all Go packages for a module between two versions and returns the functions
 // that are new or whose definitions have changed. It also checks for go.mod differences to
 // analyze dependency changes (if the dependency is also used in the project's go.mod).
-func AnalyzeModuleChanges(includeTransitive bool, gomodcache, projectDir string, moduleChanges []ModuleChange, neighbourRadius int) ([]*ModuleFunction, []string, error) {
+func AnalyzeModuleChanges(includeTransitive bool, gomodcache, projectDir string, moduleChanges []ModuleChange, neighbourRadius int,
+	postModuleAnalysisHook func([]ModuleAnalysisData) error) ([]*ModuleFunction, []string, error) {
 	visited := make(map[string]bool)
 	var changedFunctions []*ModuleFunction
 	var indirectAnalysis []moduleChangeAnalyzeFunc
+
+	// Collect module analysis data if hook is provided
+	var allModuleData []ModuleAnalysisData
+	collectAllFunctions := postModuleAnalysisHook != nil
+	if collectAllFunctions {
+		allModuleData = make([]ModuleAnalysisData, 0, len(moduleChanges))
+	}
+
 	for _, mc := range moduleChanges {
-		cf, recursiveCalls, err := analyzeModuleChangesInternal(true, includeTransitive, gomodcache,
-			mc.Name, mc.PriorVersion, mc.NewVersion, projectDir, neighbourRadius, visited)
+		cf, allFuncs, recursiveCalls, err := analyzeModuleChangesInternal(true, includeTransitive, gomodcache,
+			mc.Name, mc.PriorVersion, mc.NewVersion, projectDir, neighbourRadius, visited, collectAllFunctions)
 		if err != nil {
 			return nil, nil, err
 		}
 		changedFunctions = append(changedFunctions, cf...)
 		indirectAnalysis = append(indirectAnalysis, recursiveCalls...)
+
+		if collectAllFunctions {
+			allModuleData = append(allModuleData, ModuleAnalysisData{
+				ModuleChange:     mc,
+				AllFunctions:     allFuncs,
+				ChangedFunctions: cf,
+			})
+		}
 	}
 
 	// recursive calls are done in levels; we prefer versions found more directly depended on
@@ -120,6 +137,12 @@ func AnalyzeModuleChanges(includeTransitive bool, gomodcache, projectDir string,
 		indirectAnalysis = nil
 	}
 
+	if postModuleAnalysisHook != nil {
+		if err := postModuleAnalysisHook(allModuleData); err != nil {
+			return nil, nil, fmt.Errorf("post-module analysis hook failed: %w", err)
+		}
+	}
+
 	checkedModules := slices.Collect(maps.Keys(visited))
 	slices.Sort(checkedModules)
 	return changedFunctions, checkedModules, nil
@@ -129,15 +152,15 @@ type moduleChangeAnalyzeFunc func() ([]*ModuleFunction, []moduleChangeAnalyzeFun
 
 // analyzeModuleChangesInternal does the actual work and uses a visited map to prevent infinite recursion.
 func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modName, oldVer, newVer, projectDir string,
-	neighbourRadius int, visited map[string]bool) ([]*ModuleFunction, []moduleChangeAnalyzeFunc, error) {
+	neighbourRadius int, visited map[string]bool, collectAllFunctions bool) ([]*ModuleFunction, []*ModuleFunction, []moduleChangeAnalyzeFunc, error) {
 	if visited[modName] { // already analyzed as a root module
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	} else if root {
 		visited[modName] = true
 	} else {
 		transitiveKey := modName + "@" + oldVer + "->" + newVer
 		if visited[transitiveKey] {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
 		visited[transitiveKey] = true
 	}
@@ -160,11 +183,11 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 	}()
 	newDir, newPkgs, err := loadModulePackageFromCache(gomodcache, modName, newVer)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failure loading module %s@%s: %w", modName, newVer, err)
+		return nil, nil, nil, fmt.Errorf("failure loading module %s@%s: %w", modName, newVer, err)
 	}
 	oldLoadResult := <-resultCh
 	if oldLoadResult.err != nil {
-		return nil, nil, fmt.Errorf("failure loading module %s@%s: %w", modName, oldVer, oldLoadResult.err)
+		return nil, nil, nil, fmt.Errorf("failure loading module %s@%s: %w", modName, oldVer, oldLoadResult.err)
 	}
 	oldDir, oldPkgs := oldLoadResult.dir, oldLoadResult.pkgs
 
@@ -176,18 +199,19 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 
 	// Iterate over new packages to determine changed functions
 	var changes []*ModuleFunction
+	var allFunctions []*ModuleFunction
 	for _, newPkg := range newPkgs {
 		// Aggregate all functions in the new package
 		newFuncMap, err := aggregateFunctions(newPkg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		oldPkg, exists := oldPkgMap[newPkg.PkgPath]
 		var oldFuncMap map[string]*ModuleFunction
 		if exists {
 			oldFuncMap, err = aggregateFunctions(oldPkg)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 
@@ -200,37 +224,45 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 				changes = append(changes, oldFunc) // add the old function so that the module can accurately be referenced prior to the update
 			}
 		}
+
+		if collectAllFunctions {
+			for _, fn := range newFuncMap {
+				allFunctions = append(allFunctions, fn)
+			}
+		}
 		// we don't iterate over old functions looking for removed functions
 		// if a used public function was removed, it will be found in a compile failure
 	}
 
 	if !includeTransitive {
-		return changes, nil, nil // early return to avoid transitive dependency build below
+		return changes, allFunctions, nil, nil // early return to avoid transitive dependency build below
 	}
 
 	// Check for go.mod / go.work differences and recursively analyze changed dependencies
 	oldDeps, errOld := parseProjectDeps(oldDir, false)
 	newDeps, errNew := parseProjectDeps(newDir, true)
 	if errOld != nil || errNew != nil {
-		return nil, nil, fmt.Errorf("could not read module files for %s: %w", modName, errors.Join(errOld, errNew))
+		return nil, nil, nil, fmt.Errorf("could not read module files for %s: %w", modName, errors.Join(errOld, errNew))
 	}
 	projectDeps, err := parseProjectDeps(projectDir, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not read project dependencies: %w", err)
+		return nil, nil, nil, fmt.Errorf("could not read project dependencies: %w", err)
 	}
 	var recursiveCalls []moduleChangeAnalyzeFunc
 	for dep, newDepVer := range newDeps {
 		if oldDepVer, existed := oldDeps[dep]; !existed || oldDepVer != newDepVer {
 			if projVer, ok := projectDeps[dep]; ok && projVer != newDepVer {
 				recursiveCalls = append(recursiveCalls, func() ([]*ModuleFunction, []moduleChangeAnalyzeFunc, error) {
-					return analyzeModuleChangesInternal(false, true, gomodcache,
-						dep, projVer, newDepVer, projectDir, neighbourRadius, visited)
+					// Note: Transitive module analysis doesn't collect all functions
+					cf, _, rc, err := analyzeModuleChangesInternal(false, true, gomodcache,
+						dep, projVer, newDepVer, projectDir, neighbourRadius, visited, false)
+					return cf, rc, err
 				})
 			}
 		}
 	}
 
-	return changes, recursiveCalls, nil
+	return changes, allFunctions, recursiveCalls, nil
 }
 
 func loadModulePackageFromCache(gomodcache, modName, version string) (string, []*packages.Package, error) {

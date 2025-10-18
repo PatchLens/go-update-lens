@@ -1,6 +1,7 @@
 package lens
 
 import (
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -574,29 +575,208 @@ require example.com/foo v1.2.0
 func TestAnalyzeModuleChanges(t *testing.T) {
 	t.Parallel()
 
-	gomodcache := t.TempDir()
-	projectDir := t.TempDir()
-	modName := "example.com/hello"
+	t.Run("basic_change_detection_no_hook", func(t *testing.T) {
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+		const modName = "example.com/hello"
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "hello.go"), []byte(body), 0o644))
+		}
 
-	createModule := func(version, body string) {
-		dir := filepath.Join(gomodcache, modName+"@"+version)
-		require.NoError(t, os.MkdirAll(dir, 0o755))
-		modFile := "module " + modName + "\n\ngo 1.20\n"
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "hello.go"), []byte(body), 0o644))
-	}
+		createModule("v1.0.0", "package hello\n\nfunc Foo() int { return 1 }\n")
+		createModule("v1.1.0", "package hello\n\nfunc Foo() int { return 2 }\n")
 
-	createModule("v1.0.0", "package hello\n\nfunc Foo() int { return 1 }\n")
-	createModule("v1.1.0", "package hello\n\nfunc Foo() int { return 2 }\n")
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, nil)
+		require.NoError(t, err)
+		require.Len(t, checked, 1)
+		assert.Equal(t, modName, checked[0])
+		require.Len(t, funcs, 1)
+		assert.Equal(t, "Foo", funcs[0].FunctionName)
+		assert.Contains(t, funcs[0].Definition, "return 1")
+	})
 
-	mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-	funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0)
-	require.NoError(t, err)
-	require.Len(t, checked, 1)
-	assert.Equal(t, modName, checked[0])
-	require.Len(t, funcs, 1)
-	assert.Equal(t, "Foo", funcs[0].FunctionName)
-	assert.Contains(t, funcs[0].Definition, "return 1")
+	t.Run("hook_collects_all_functions", func(t *testing.T) {
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+		const modName = "example.com/multi"
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "multi.go"), []byte(body), 0o644))
+		}
+
+		// Old version has 2 functions
+		createModule("v1.0.0", `package multi
+
+func Foo() int { return 1 }
+func Bar() int { return 10 }
+`)
+		// New version: Foo changed, Bar unchanged, Baz added
+		createModule("v1.1.0", `package multi
+
+func Foo() int { return 2 }
+func Bar() int { return 10 }
+func Baz() int { return 30 }
+`)
+
+		var hookCalled bool
+		var hookData []ModuleAnalysisData
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
+			hookCalled = true
+			hookData = data
+			return nil
+		})
+
+		require.NoError(t, err)
+		require.True(t, hookCalled, "hook should be called")
+		require.Len(t, hookData, 1)
+
+		// Check ModuleAnalysisData structure
+		assert.Equal(t, modName, hookData[0].ModuleChange.Name)
+		assert.Equal(t, "v1.0.0", hookData[0].ModuleChange.PriorVersion)
+		assert.Equal(t, "v1.1.0", hookData[0].ModuleChange.NewVersion)
+
+		// AllFunctions should contain all 3 functions from new version
+		require.Len(t, hookData[0].AllFunctions, 3)
+		allFuncNames := make(map[string]bool)
+		for _, fn := range hookData[0].AllFunctions {
+			allFuncNames[fn.FunctionName] = true
+		}
+		assert.True(t, allFuncNames["Foo"])
+		assert.True(t, allFuncNames["Bar"])
+		assert.True(t, allFuncNames["Baz"])
+
+		// ChangedFunctions should only contain Foo (changed)
+		require.Len(t, hookData[0].ChangedFunctions, 1)
+		assert.Equal(t, "Foo", hookData[0].ChangedFunctions[0].FunctionName)
+
+		// Main return value should also only have changed functions
+		require.Len(t, funcs, 1)
+		assert.Equal(t, "Foo", funcs[0].FunctionName)
+		require.Len(t, checked, 1)
+		assert.Equal(t, modName, checked[0])
+	})
+
+	t.Run("hook_error_propagates", func(t *testing.T) {
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+		const modName = "example.com/error"
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(body), 0o644))
+		}
+
+		createModule("v1.0.0", "package error\n\nfunc Test() int { return 1 }\n")
+		createModule("v1.1.0", "package error\n\nfunc Test() int { return 2 }\n")
+
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
+			return errors.New("test hook error")
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-module analysis hook failed")
+		assert.Contains(t, err.Error(), "test hook error")
+	})
+
+	t.Run("multiple_modules_hook_data", func(t *testing.T) {
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+		createModule := func(modName, version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte(body), 0o644))
+		}
+
+		// Module alpha
+		createModule("example.com/alpha", "v1.0.0", "package alpha\n\nfunc A1() int { return 1 }\n")
+		createModule("example.com/alpha", "v1.1.0", "package alpha\n\nfunc A1() int { return 2 }\nfunc A2() int { return 3 }\n")
+
+		// Module beta
+		createModule("example.com/beta", "v2.0.0", "package beta\n\nfunc B1() int { return 10 }\n")
+		createModule("example.com/beta", "v2.1.0", "package beta\n\nfunc B1() int { return 20 }\n")
+
+		var hookData []ModuleAnalysisData
+		mods := []ModuleChange{
+			{Name: "example.com/alpha", PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
+			{Name: "example.com/beta", PriorVersion: "v2.0.0", NewVersion: "v2.1.0"},
+		}
+
+		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
+			hookData = data
+			return nil
+		})
+
+		require.NoError(t, err)
+		require.Len(t, hookData, 2)
+
+		// Check module alpha data
+		assert.Equal(t, "example.com/alpha", hookData[0].ModuleChange.Name)
+		require.Len(t, hookData[0].AllFunctions, 2)     // A1 and A2
+		require.Len(t, hookData[0].ChangedFunctions, 1) // only A1 changed
+
+		// Check module beta data
+		assert.Equal(t, "example.com/beta", hookData[1].ModuleChange.Name)
+		require.Len(t, hookData[1].AllFunctions, 1)     // B1
+		require.Len(t, hookData[1].ChangedFunctions, 1) // B1 changed
+
+		// Main return should have 2 changed functions total
+		require.Len(t, funcs, 2)
+		require.Len(t, checked, 2)
+	})
+
+	t.Run("no_changes", func(t *testing.T) {
+		gomodcache := t.TempDir()
+		projectDir := t.TempDir()
+		const modName = "example.com/nochange"
+
+		createModule := func(version, body string) {
+			dir := filepath.Join(gomodcache, modName+"@"+version)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			modFile := "module " + modName + "\n\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte(body), 0o644))
+		}
+
+		// Same code in both versions
+		sameCode := "package nochange\n\nfunc Same() int { return 42 }\n"
+		createModule("v1.0.0", sameCode)
+		createModule("v1.1.0", sameCode)
+
+		var hookData []ModuleAnalysisData
+		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
+			hookData = data
+			return nil
+		})
+
+		require.NoError(t, err)
+		require.Len(t, hookData, 1)
+
+		// AllFunctions should contain the function
+		require.Len(t, hookData[0].AllFunctions, 1)
+		assert.Equal(t, "Same", hookData[0].AllFunctions[0].FunctionName)
+
+		// ChangedFunctions should be empty (no changes)
+		assert.Empty(t, hookData[0].ChangedFunctions)
+
+		// Main return should have no changed functions
+		assert.Empty(t, funcs)
+		require.Len(t, checked, 1)
+	})
 }
 
 func TestFindModuleVersionWorkspace(t *testing.T) {
