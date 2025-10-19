@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-analyze/bulk"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/packages"
@@ -24,12 +25,12 @@ const debugCallChain = "" // Set to function name to log call chains with functi
 
 // CallerStaticAnalysis performs static analysis to determine which project functions call
 // the provided moduleChanges. Returned are the functions in the project that may delegate
-// to the updated module functions.
-func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, error) {
+// to the updated module functions, along with the call graph.
+func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, error) {
 	// Load all non-test packages in the project and build SSA and call-graph using CHA (class hierarchy analysis)
 	cg, err := loadProjectPackageCallGraph(projectDir, false)
 	if err != nil || cg == nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Match changed Functions -> *ssa.Function nodes for quick comparison
@@ -107,7 +108,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 		})
 	}
 	if err := eg.Wait(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	result := slices.Collect(maps.Values(callerFuncMap))
@@ -118,7 +119,57 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 			reachableModuleChanges[f.FunctionIdent] = f
 		}
 	}
-	return result, reachableModuleChanges, nil
+
+	return result, reachableModuleChanges, cg, nil
+}
+
+// extractCallGraphEdges converts the SSA call graph into a simple identifier mapping.
+// Functions with no outgoing calls will have nil slices for memory efficiency.
+func extractCallGraphEdges(cg *callgraph.Graph) map[string][]string {
+	if cg == nil {
+		return map[string][]string{}
+	}
+
+	edges := make(map[string][]string)
+	for fn, node := range cg.Nodes {
+		if fn == nil {
+			continue
+		}
+
+		callerIdent, supported := MakeSSAFunctionIdent(fn)
+		if !supported {
+			continue
+		}
+
+		// Collect all outgoing edges
+		outEdges := bulk.SliceFilter(func(edge *callgraph.Edge) bool {
+			return edge.Callee != nil && edge.Callee.Func != nil
+		}, node.Out)
+
+		if len(outEdges) == 0 {
+			// Store nil for leaf functions (memory efficiency)
+			edges[callerIdent] = nil
+		} else {
+			calleeSet := bulk.SliceToSetBy(func(edge *callgraph.Edge) string {
+				calleeIdent, _ := MakeSSAFunctionIdent(edge.Callee.Func)
+				return calleeIdent
+			}, outEdges)
+			callees := make([]string, 0, len(calleeSet))
+			for calleeIdent := range calleeSet {
+				if calleeIdent != "" {
+					callees = append(callees, calleeIdent)
+				}
+			}
+
+			if len(callees) > 0 {
+				edges[callerIdent] = callees
+			} else {
+				edges[callerIdent] = nil
+			}
+		}
+	}
+
+	return edges
 }
 
 // IsGeneratedFile returns true if the filename follows known patterns for generated go files.

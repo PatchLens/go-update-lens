@@ -590,7 +590,7 @@ func TestCallerStaticAnalysis(t *testing.T) {
 		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:sliceUniqueUnion"}},
 	}
 
-	callers, reachable, err := CallerStaticAnalysis(changes, root)
+	callers, reachable, _, err := CallerStaticAnalysis(changes, root)
 	require.NoError(t, err)
 	assert.Len(t, callers, 8)
 
@@ -631,7 +631,7 @@ func TestTestStaticAnalysis(t *testing.T) {
 		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:sliceUniqueUnion"}},
 	}
 
-	callers, _, err := CallerStaticAnalysis(changes, root)
+	callers, _, _, err := CallerStaticAnalysis(changes, root)
 	require.NoError(t, err)
 
 	tests, err := TestStaticAnalysis(callers, root)
@@ -651,4 +651,108 @@ func TestTestStaticAnalysis(t *testing.T) {
 	assert.ElementsMatch(t, want, got)
 	assert.NotContains(t, got, "example.com/projtest/proj:TestUnused")
 	assert.NotContains(t, got, "example.com/projtest/proj:TestRunnerUnused")
+}
+
+func TestExtractCallGraphEdges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	t.Parallel()
+
+	root := createStaticAnalysisProject(t)
+
+	changes := []*ModuleFunction{
+		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:SetMapValues"}},
+		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:OpenCSV"}},
+	}
+
+	_, _, cg, err := CallerStaticAnalysis(changes, root)
+	require.NoError(t, err)
+	require.NotNil(t, cg, "call graph should not be nil")
+
+	// Extract edges
+	edges := extractCallGraphEdges(cg)
+	require.NotNil(t, edges)
+
+	// Validate expected call relationships exist in the edge map
+	// StepA -> StepB
+	stepAEdges := edges["example.com/projtest/proj:StepA"]
+	assert.Contains(t, stepAEdges, "example.com/projtest/proj:StepB")
+
+	// StepB -> StepC
+	stepBEdges := edges["example.com/projtest/proj:StepB"]
+	assert.Contains(t, stepBEdges, "example.com/projtest/proj:StepC")
+
+	// StepC -> ffmap.SetMapValues
+	stepCEdges := edges["example.com/projtest/proj:StepC"]
+	require.NotNil(t, stepCEdges)
+	// External module functions may have simplified identifiers
+	hasSetMapValues := false
+	for _, edge := range stepCEdges {
+		if strings.Contains(edge, "SetMapValues") {
+			hasSetMapValues = true
+			break
+		}
+	}
+	assert.True(t, hasSetMapValues)
+
+	// StepD -> ffmap.OpenCSV
+	stepDEdges := edges["example.com/projtest/proj:StepD"]
+	require.NotNil(t, stepDEdges)
+	hasOpenCSV := false
+	for _, edge := range stepDEdges {
+		if strings.Contains(edge, "OpenCSV") {
+			hasOpenCSV = true
+			break
+		}
+	}
+	assert.True(t, hasOpenCSV)
+
+	// Runner.StepA -> Runner.StepB
+	runnerStepAEdges := edges["example.com/projtest/proj:Runner.StepA"]
+	assert.Contains(t, runnerStepAEdges, "example.com/projtest/proj:Runner.StepB")
+
+	// Runner.StepB -> Runner.StepC
+	runnerStepBEdges := edges["example.com/projtest/proj:Runner.StepB"]
+	assert.Contains(t, runnerStepBEdges, "example.com/projtest/proj:Runner.StepC")
+
+	// Runner.StepC -> ffmap.SetMapValues
+	runnerStepCEdges := edges["example.com/projtest/proj:Runner.StepC"]
+	require.NotNil(t, runnerStepCEdges)
+	hasRunnerSetMapValues := false
+	for _, edge := range runnerStepCEdges {
+		if strings.Contains(edge, "SetMapValues") {
+			hasRunnerSetMapValues = true
+			break
+		}
+	}
+	assert.True(t, hasRunnerSetMapValues)
+
+	// Runner.StepD -> ffmap.OpenCSV
+	runnerStepDEdges := edges["example.com/projtest/proj:Runner.StepD"]
+	require.NotNil(t, runnerStepDEdges)
+	hasRunnerOpenCSV := false
+	for _, edge := range runnerStepDEdges {
+		if strings.Contains(edge, "OpenCSV") {
+			hasRunnerOpenCSV = true
+			break
+		}
+	}
+	assert.True(t, hasRunnerOpenCSV)
+
+	// Validate that functions with no outgoing calls have nil edges (memory efficiency)
+	// or are not in the map (since their leaf functions)
+	unused := edges["example.com/projtest/proj:Unused"]
+	assert.Nil(t, unused, "Unused function should have nil edges as it has no outgoing calls")
+
+	runnerUnused := edges["example.com/projtest/proj:Runner.Unused"]
+	assert.Nil(t, runnerUnused, "Runner.Unused should have nil edges as it has no outgoing calls")
+}
+
+func TestExtractCallGraphEdges_NilGraph(t *testing.T) {
+	t.Parallel()
+
+	edges := extractCallGraphEdges(nil)
+	assert.NotNil(t, edges)
+	assert.Empty(t, edges)
 }

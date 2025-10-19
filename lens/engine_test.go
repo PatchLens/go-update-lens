@@ -1288,13 +1288,16 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		var hookCalled bool
 		var receivedModuleChanges []*ModuleFunction
 		var receivedCallersCount, receivedReachableCount int
+		var receivedIdentEdges map[string][]string
 		provider := &DefaultCallerAnalysisProvider{
-			PostCallerAnalysis: func(moduleChanges []*ModuleFunction,
+			PostCallerAnalysis: func(identEdges map[string][]string,
+				moduleChanges []*ModuleFunction,
 				callers []*CallerFunction, reachable ReachableModuleChange) error {
 				hookCalled = true
 				receivedModuleChanges = moduleChanges
 				receivedCallersCount = len(callers)
 				receivedReachableCount = len(reachable)
+				receivedIdentEdges = identEdges
 				return nil
 			},
 		}
@@ -1312,6 +1315,11 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		// receivedCallersCount and receivedReachableCount may be 0 in test environment
 		assert.GreaterOrEqual(t, receivedCallersCount, 0)
 		assert.GreaterOrEqual(t, receivedReachableCount, 0)
+
+		// Validate identEdges parameter
+		assert.NotNil(t, receivedIdentEdges, "identEdges should not be nil when hook exists")
+		// The edge map should be present (may be empty for simple test config)
+		assert.IsType(t, map[string][]string{}, receivedIdentEdges)
 	})
 
 	t.Run("hook_error", func(t *testing.T) {
@@ -1319,7 +1327,8 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 
 		expectedErr := errors.New("hook analysis failed")
 		provider := &DefaultCallerAnalysisProvider{
-			PostCallerAnalysis: func(moduleChanges []*ModuleFunction,
+			PostCallerAnalysis: func(identEdges map[string][]string,
+				moduleChanges []*ModuleFunction,
 				callers []*CallerFunction, reachable ReachableModuleChange) error {
 				return expectedErr
 			},
