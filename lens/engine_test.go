@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 type mockModuleChangeProvider struct {
@@ -1290,7 +1291,7 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		var receivedCallersCount, receivedReachableCount int
 		var receivedIdentEdges map[string][]string
 		provider := &DefaultCallerAnalysisProvider{
-			PostCallerAnalysis: func(identEdges map[string][]string,
+			PostCallerAnalysis: func(packages []*packages.Package, identEdges map[string][]string,
 				moduleChanges []*ModuleFunction,
 				callers []*CallerFunction, reachable ReachableModuleChange) error {
 				hookCalled = true
@@ -1327,7 +1328,7 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 
 		expectedErr := errors.New("hook analysis failed")
 		provider := &DefaultCallerAnalysisProvider{
-			PostCallerAnalysis: func(identEdges map[string][]string,
+			PostCallerAnalysis: func(packages []*packages.Package, identEdges map[string][]string,
 				moduleChanges []*ModuleFunction,
 				callers []*CallerFunction, reachable ReachableModuleChange) error {
 				return expectedErr

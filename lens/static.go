@@ -25,12 +25,12 @@ const debugCallChain = "" // Set to function name to log call chains with functi
 
 // CallerStaticAnalysis performs static analysis to determine which project functions call
 // the provided moduleChanges. Returned are the functions in the project that may delegate
-// to the updated module functions, along with the call graph.
-func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, error) {
+// to the updated module functions, along with the call graph and loaded packages with type information.
+func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, []*packages.Package, error) {
 	// Load all non-test packages in the project and build SSA and call-graph using CHA (class hierarchy analysis)
-	cg, err := loadProjectPackageCallGraph(projectDir, false)
+	cg, _, pkgs, err := LoadProjectCallGraph(projectDir, false)
 	if err != nil || cg == nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Match changed Functions -> *ssa.Function nodes for quick comparison
@@ -108,7 +108,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 		})
 	}
 	if err := eg.Wait(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	result := slices.Collect(maps.Values(callerFuncMap))
@@ -120,7 +120,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 		}
 	}
 
-	return result, reachableModuleChanges, cg, nil
+	return result, reachableModuleChanges, cg, pkgs, nil
 }
 
 // extractCallGraphEdges converts the SSA call graph into a simple identifier mapping.
