@@ -63,13 +63,19 @@ func (f Function) ShortIdent() string {
 	return f.FunctionIdent
 }
 
-// ModuleFunction represents the definition of a changed module function.
+// ModuleFunction represents a function from a module version being analyzed.
+// Depending on context, this may represent either the old or new version of a function:
+//   - In ModuleAnalysisData.ChangedFunctions: OLD version
+//   - In ModuleAnalysisData.AllFunctions: NEW version
+//   - In AnalyzeModuleChanges return value: OLD version
 type ModuleFunction struct {
 	Function
 
-	// Definition contains the function's source code.
+	// Definition contains the function's source code from the analyzed version.
 	Definition string
-	// LineChangeBitmap marks changed lines starting at funcStart.
+	// LineChangeBitmap marks which lines changed between versions.
+	// The bitmap indices correspond to lines in this function's Definition.
+	// For unchanged functions, this is empty/nil.
 	LineChangeBitmap []bool
 }
 

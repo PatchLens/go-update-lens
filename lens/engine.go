@@ -249,11 +249,15 @@ type ModuleAnalysisData struct {
 	// ModuleChange identifies the module and versions being compared
 	ModuleChange ModuleChange
 
-	// AllFunctions contains ALL functions in the new version of the module.
+	// AllFunctions contains ALL functions from the NEW (post-update) version of the module.
+	// Each ModuleFunction.Definition contains the new version's source code.
+	// For changed functions, LineChangeBitmap marks which lines changed relative to the new definition.
 	AllFunctions []*ModuleFunction
 
-	// ChangedFunctions contains only the functions that changed between versions.
-	// This is a subset of AllFunctions.
+	// ChangedFunctions contains only functions that changed between versions, using
+	// the OLD (pre-update) version's definition with LineChangeBitmap marking modified lines
+	// relative to the old definition.
+	// Each ModuleFunction.Definition contains the old version's source code.
 	ChangedFunctions []*ModuleFunction
 }
 

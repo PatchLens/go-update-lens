@@ -90,6 +90,17 @@ func DiffModulesFromGoModFiles(oldGoModPath, newGoModPath string) ([]ModuleChang
 // AnalyzeModuleChanges loads all Go packages for a module between two versions and returns the functions
 // that are new or whose definitions have changed. It also checks for go.mod differences to
 // analyze dependency changes (if the dependency is also used in the project's go.mod).
+//
+// Both old and new module versions are loaded in parallel from the module cache. The returned
+// changed functions contain the OLD version's Definition with LineChangeBitmap marking changed lines
+// in the old definition. If postModuleAnalysisHook is provided, it receives ModuleAnalysisData with:
+//   - ChangedFunctions: OLD version with LineChangeBitmap relative to old definition
+//   - AllFunctions: NEW version with LineChangeBitmap relative to new definition (for changed functions)
+//
+// Returns:
+//   - []*ModuleFunction: Functions that changed (OLD version)
+//   - []string: Module names that were analyzed
+//   - error: Any error during analysis
 func AnalyzeModuleChanges(includeTransitive bool, gomodcache, projectDir string, moduleChanges []ModuleChange, neighbourRadius int,
 	postModuleAnalysisHook func([]ModuleAnalysisData) error) ([]*ModuleFunction, []string, error) {
 	visited := make(map[string]bool)
@@ -226,8 +237,14 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 		}
 
 		if collectAllFunctions {
-			for _, fn := range newFuncMap {
-				allFunctions = append(allFunctions, fn)
+			for funcKey, newFunc := range newFuncMap {
+				if oldFuncMap != nil {
+					if oldFunc, ok := oldFuncMap[funcKey]; ok && oldFunc.Definition != newFunc.Definition {
+						// Swap arguments so bitmap is relative to NEW Definition
+						newFunc.LineChangeBitmap = computeChangeLineBitmap(newFunc.Definition, oldFunc.Definition, false, neighbourRadius)
+					}
+				}
+				allFunctions = append(allFunctions, newFunc)
 			}
 		}
 		// we don't iterate over old functions looking for removed functions
