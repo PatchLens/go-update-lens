@@ -241,7 +241,8 @@ func analyzeModuleChangesInternal(root, includeTransitive bool, gomodcache, modN
 				if oldFuncMap != nil {
 					if oldFunc, ok := oldFuncMap[funcKey]; ok && oldFunc.Definition != newFunc.Definition {
 						// Swap arguments so bitmap is relative to NEW Definition
-						newFunc.LineChangeBitmap = computeChangeLineBitmap(newFunc.Definition, oldFunc.Definition, false, neighbourRadius)
+						// Use radius=0 for new version bitmap to mark only exact changed lines
+						newFunc.LineChangeBitmap = computeChangeLineBitmap(newFunc.Definition, oldFunc.Definition, false, 0)
 					}
 				}
 				allFunctions = append(allFunctions, newFunc)

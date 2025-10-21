@@ -76,6 +76,7 @@ type ModuleFunction struct {
 	// LineChangeBitmap marks which lines changed between versions.
 	// The bitmap indices correspond to lines in this function's Definition.
 	// For unchanged functions, this is empty/nil.
+	// New function defs will always have a LineChangeBitmap of radius 0 to show exact line changes.
 	LineChangeBitmap []bool
 }
 
