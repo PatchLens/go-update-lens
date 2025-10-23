@@ -243,16 +243,10 @@ type ReportWriter interface {
 }
 
 // ModuleAnalysisData contains the complete analysis data for a single module update.
-// This structure is passed to PostModuleAnalysis hooks to provide extensions with
-// access to all functions in the module (not just changed ones).
+// This structure is passed to PostModuleAnalysis hooks to provide extensions with changed function data.
 type ModuleAnalysisData struct {
 	// ModuleChange identifies the module and versions being compared
 	ModuleChange ModuleChange
-
-	// AllFunctions contains ALL functions from the NEW (post-update) version of the module.
-	// Each ModuleFunction.Definition contains the new version's source code.
-	// For changed functions, LineChangeBitmap marks which lines changed relative to the new definition.
-	AllFunctions []*ModuleFunction
 
 	// ChangedFunctions contains only functions that changed between versions, using
 	// the OLD (pre-update) version's definition with LineChangeBitmap marking modified lines

@@ -66,7 +66,6 @@ func (f Function) ShortIdent() string {
 // ModuleFunction represents a function from a module version being analyzed.
 // Depending on context, this may represent either the old or new version of a function:
 //   - In ModuleAnalysisData.ChangedFunctions: OLD version
-//   - In ModuleAnalysisData.AllFunctions: NEW version
 //   - In AnalyzeModuleChanges return value: OLD version
 type ModuleFunction struct {
 	Function
@@ -78,6 +77,8 @@ type ModuleFunction struct {
 	// For unchanged functions, this is empty/nil.
 	// New function defs will always have a LineChangeBitmap of radius 0 to show exact line changes.
 	LineChangeBitmap []bool
+	// Module identifies which module this function belongs to, including version information.
+	Module *ModuleChange
 }
 
 // ReachableModuleChange maps function identifiers to changed functions.

@@ -644,16 +644,6 @@ func Baz() int { return 30 }
 		assert.Equal(t, "v1.0.0", hookData[0].ModuleChange.PriorVersion)
 		assert.Equal(t, "v1.1.0", hookData[0].ModuleChange.NewVersion)
 
-		// AllFunctions should contain all 3 functions from new version
-		require.Len(t, hookData[0].AllFunctions, 3)
-		allFuncNames := make(map[string]bool)
-		for _, fn := range hookData[0].AllFunctions {
-			allFuncNames[fn.FunctionName] = true
-		}
-		assert.True(t, allFuncNames["Foo"])
-		assert.True(t, allFuncNames["Bar"])
-		assert.True(t, allFuncNames["Baz"])
-
 		// ChangedFunctions should only contain Foo (changed)
 		require.Len(t, hookData[0].ChangedFunctions, 1)
 		assert.Equal(t, "Foo", hookData[0].ChangedFunctions[0].FunctionName)
@@ -725,12 +715,10 @@ func Baz() int { return 30 }
 
 		// Check module alpha data
 		assert.Equal(t, "example.com/alpha", hookData[0].ModuleChange.Name)
-		require.Len(t, hookData[0].AllFunctions, 2)     // A1 and A2
 		require.Len(t, hookData[0].ChangedFunctions, 1) // only A1 changed
 
 		// Check module beta data
 		assert.Equal(t, "example.com/beta", hookData[1].ModuleChange.Name)
-		require.Len(t, hookData[1].AllFunctions, 1)     // B1
 		require.Len(t, hookData[1].ChangedFunctions, 1) // B1 changed
 
 		// Main return should have 2 changed functions total
@@ -765,10 +753,6 @@ func Baz() int { return 30 }
 
 		require.NoError(t, err)
 		require.Len(t, hookData, 1)
-
-		// AllFunctions should contain the function
-		require.Len(t, hookData[0].AllFunctions, 1)
-		assert.Equal(t, "Same", hookData[0].AllFunctions[0].FunctionName)
 
 		// ChangedFunctions should be empty (no changes)
 		assert.Empty(t, hookData[0].ChangedFunctions)

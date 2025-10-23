@@ -1406,23 +1406,9 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		require.Len(t, receivedData, 1)
 
 		data := receivedData[0]
-		// AllFunctions should have both Foo and Bar
-		assert.Len(t, data.AllFunctions, 2)
-		// ChangedFunctions should only have Foo
+		// ChangedFunctions should only have Foo (Bar is unchanged)
 		assert.Len(t, data.ChangedFunctions, 1)
-
-		// Verify ChangedFunctions is a subset of AllFunctions
-		changedNames := make(map[string]bool)
-		for _, fn := range data.ChangedFunctions {
-			changedNames[fn.FunctionName] = true
-		}
-		allNames := make(map[string]bool)
-		for _, fn := range data.AllFunctions {
-			allNames[fn.FunctionName] = true
-		}
-		for name := range changedNames {
-			assert.True(t, allNames[name])
-		}
+		assert.Equal(t, "Foo", data.ChangedFunctions[0].FunctionName)
 	})
 
 	t.Run("multiple_modules", func(t *testing.T) {
@@ -1472,7 +1458,6 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		// Verify each module's data structure
 		for _, data := range receivedData {
 			assert.NotEmpty(t, data.ModuleChange.Name)
-			assert.NotEmpty(t, data.AllFunctions)
 			assert.NotEmpty(t, data.ChangedFunctions)
 		}
 	})
