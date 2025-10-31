@@ -590,13 +590,14 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 
 // InjectFuncPointBeforeCall injects monitoring points before call expressions that match the predicate.
 // The predicate function is called for each CallExpr in the function body.
-// If it returns true, a state monitoring point is injected immediately before that call.
+// If it returns true for inject, a state monitoring point is injected immediately before that call,
+// and the returned metadata is associated with that point ID.
 //
 // The monitoring point captures only the arguments passed to the matched call, not all visible variables,
 // to reduce memory overhead and focus on the specific data being passed to the function.
 //
-// Returns the list of point IDs that were injected.
-func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) bool) ([]int, error) {
+// Returns a map from point ID to caller-provided metadata for all injection points.
+func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) (metadata any, inject bool)) (map[int]any, error) {
 	const modificationMarker = "patchlens:before-call"
 	lock := astFileLock.Lock(fn.FilePath)
 	defer lock.Unlock()
@@ -609,7 +610,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	if funcDecl == nil || funcDecl.Body == nil {
 		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionName, fn.FilePath)
 	} else if hasPatchlensMarker(funcDecl, modificationMarker) {
-		return []int{}, nil // already inserted
+		return map[int]any{}, nil // already inserted
 	}
 	filePackageNames := make(map[string]bool, len(fileNode.Imports))
 	for _, imp := range fileNode.Imports {
@@ -625,19 +626,23 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		}
 	}
 
-	var pointIDs []int
+	pointMap := make(map[int]any)
 	var buf bytes.Buffer
-	// Helper to find a matching call in a node, or nil if not found
-	findMatchingCall := func(node ast.Node) *ast.CallExpr {
+	// Helper to find a matching call in a node, returns the call and its metadata if found
+	findMatchingCall := func(node ast.Node) (*ast.CallExpr, any) {
 		var matchedCall *ast.CallExpr
+		var metadata any
 		ast.Inspect(node, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok && shouldInject(call) {
-				matchedCall = call
-				return false
+			if call, ok := n.(*ast.CallExpr); ok {
+				if m, inject := shouldInject(call); inject {
+					matchedCall = call
+					metadata = m
+					return false
+				}
 			}
 			return true
 		})
-		return matchedCall
+		return matchedCall, metadata
 	}
 
 	var rewriteBlock func(*ast.BlockStmt) error
@@ -646,69 +651,72 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		for _, st := range blk.List {
 			// Check if this statement contains a matching call (excluding nested blocks)
 			var matchedCall *ast.CallExpr
+			var metadata any
 			switch stmt := st.(type) {
 			case *ast.ExprStmt:
-				matchedCall = findMatchingCall(stmt.X)
+				matchedCall, metadata = findMatchingCall(stmt.X)
 			case *ast.AssignStmt:
-				matchedCall = findMatchingCall(stmt)
+				matchedCall, metadata = findMatchingCall(stmt)
 			case *ast.ReturnStmt:
-				matchedCall = findMatchingCall(stmt)
+				matchedCall, metadata = findMatchingCall(stmt)
 			case *ast.DeferStmt:
-				if shouldInject(stmt.Call) {
+				if m, inject := shouldInject(stmt.Call); inject {
 					matchedCall = stmt.Call
+					metadata = m
 				}
 			case *ast.GoStmt:
-				if shouldInject(stmt.Call) {
+				if m, inject := shouldInject(stmt.Call); inject {
 					matchedCall = stmt.Call
+					metadata = m
 				}
 			case *ast.DeclStmt:
 				// Handle var x = call()
-				matchedCall = findMatchingCall(stmt)
+				matchedCall, metadata = findMatchingCall(stmt)
 			case *ast.SendStmt:
 				// Handle ch <- call()
-				matchedCall = findMatchingCall(stmt.Value)
+				matchedCall, metadata = findMatchingCall(stmt.Value)
 			case *ast.IfStmt:
 				// Handle if x := call(); condition and if call() { }
 				if stmt.Init != nil {
-					matchedCall = findMatchingCall(stmt.Init)
+					matchedCall, metadata = findMatchingCall(stmt.Init)
 				}
 				if matchedCall == nil && stmt.Cond != nil {
-					matchedCall = findMatchingCall(stmt.Cond)
+					matchedCall, metadata = findMatchingCall(stmt.Cond)
 				}
 			case *ast.ForStmt:
 				// Handle for i := call(); condition; post
 				if stmt.Init != nil {
-					matchedCall = findMatchingCall(stmt.Init)
+					matchedCall, metadata = findMatchingCall(stmt.Init)
 				}
 				if matchedCall == nil && stmt.Cond != nil {
-					matchedCall = findMatchingCall(stmt.Cond)
+					matchedCall, metadata = findMatchingCall(stmt.Cond)
 				}
 				// Post statement handled separately in recursion section
 			case *ast.RangeStmt:
 				// Handle for x := range call()
-				matchedCall = findMatchingCall(stmt.X)
+				matchedCall, metadata = findMatchingCall(stmt.X)
 			case *ast.SwitchStmt:
 				// Handle switch x := call(); x and switch call() { }
 				if stmt.Init != nil {
-					matchedCall = findMatchingCall(stmt.Init)
+					matchedCall, metadata = findMatchingCall(stmt.Init)
 				}
 				if matchedCall == nil && stmt.Tag != nil {
-					matchedCall = findMatchingCall(stmt.Tag)
+					matchedCall, metadata = findMatchingCall(stmt.Tag)
 				}
 			case *ast.TypeSwitchStmt:
 				// Handle switch x := call().(type) and switch call().(type) { }
 				if stmt.Init != nil {
-					matchedCall = findMatchingCall(stmt.Init)
+					matchedCall, metadata = findMatchingCall(stmt.Init)
 				}
 				if matchedCall == nil {
-					matchedCall = findMatchingCall(stmt.Assign)
+					matchedCall, metadata = findMatchingCall(stmt.Assign)
 				}
 			case *ast.SelectStmt:
 				// Handle select { case ch <- call(): ... }
 				// Check all comm clauses
 				for _, commStmt := range stmt.Body.List {
 					if cc, ok := commStmt.(*ast.CommClause); ok && cc.Comm != nil {
-						matchedCall = findMatchingCall(cc.Comm)
+						matchedCall, metadata = findMatchingCall(cc.Comm)
 						if matchedCall != nil {
 							break
 						}
@@ -721,7 +729,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 				if err != nil {
 					return err
 				}
-				pointIDs = append(pointIDs, pointID)
+				pointMap[pointID] = metadata
 
 				preStmts, err := buildCallInstrumentationWithArgs(&buf, pointID, matchedCall, filePackageNames)
 				if err != nil {
@@ -759,12 +767,12 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 			case *ast.ForStmt:
 				// If Post contains a matching call, wrap it so temps stay in scope per iteration
 				if s.Post != nil {
-					if postCall := findMatchingCall(s.Post); postCall != nil {
+					if postCall, postMetadata := findMatchingCall(s.Post); postCall != nil {
 						pointID, err := m.nextPointId()
 						if err != nil {
 							return err
 						}
-						pointIDs = append(pointIDs, pointID)
+						pointMap[pointID] = postMetadata
 						preStmts, err := buildCallInstrumentationWithArgs(&buf, pointID, postCall, filePackageNames)
 						if err != nil {
 							return err
@@ -839,7 +847,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		Text:  "// " + modificationMarker,
 	})
 
-	return pointIDs, nil
+	return pointMap, nil
 }
 
 // buildCallInstrumentationWithArgs creates a statement that sends the call's receiver (if any) and argument values to the monitoring server.

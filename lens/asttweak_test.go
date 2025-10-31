@@ -1049,7 +1049,7 @@ func TestInjectFuncPointBeforeCall(t *testing.T) {
 		name           string
 		src            string
 		funcName       string
-		predicate      func(*ast.CallExpr) bool
+		predicate      func(*ast.CallExpr) (any, bool)
 		expectedPoints int
 		expectedCalls  map[string]int // pkg.Func -> count after injection
 	}{
@@ -1062,13 +1062,13 @@ func ProcessData(data string) {
 	fmt.Printf("Data: %s\n", data)
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Printf": 1},
@@ -1084,13 +1084,13 @@ func ProcessData(a, b string) {
 	fmt.Printf("Second: %s\n", b)
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 2,
 			expectedCalls:  map[string]int{"fmt.Printf": 2, "fmt.Println": 1},
@@ -1109,13 +1109,13 @@ func ProcessData(data string) {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 2,
 			expectedCalls:  map[string]int{"fmt.Printf": 2},
@@ -1129,13 +1129,13 @@ func ProcessData(data string) {
 	fmt.Println("No Printf here")
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 0,
 			expectedCalls:  map[string]int{"fmt.Println": 1},
@@ -1156,13 +1156,13 @@ func ProcessData(op string) {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 2,
 			expectedCalls:  map[string]int{"fmt.Printf": 2, "fmt.Println": 1},
@@ -1177,8 +1177,8 @@ func ProcessData(data string) {
 	fmt.Println("Log message")
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
-				return false // Never match
+			predicate: func(call *ast.CallExpr) (any, bool) {
+				return nil, false // Never match
 			},
 			expectedPoints: 0,
 			expectedCalls:  map[string]int{"fmt.Printf": 1, "fmt.Println": 1},
@@ -1193,13 +1193,13 @@ func ProcessData() {
 	_ = x
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
@@ -1215,13 +1215,13 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
@@ -1237,13 +1237,13 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == "Sprint"
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == "Sprint"
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 2, // Init and Post
 			expectedCalls:  map[string]int{"fmt.Sprint": 2},
@@ -1260,13 +1260,13 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
@@ -1284,11 +1284,11 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if ident, ok := call.Fun.(*ast.Ident); ok {
-					return ident.Name == "GetSlice"
+					return struct{}{}, ident.Name == "GetSlice"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Println": 1},
@@ -1303,13 +1303,13 @@ func ProcessData() {
 	_, _ = x, y
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1, // One monitoring point before the entire statement
 			expectedCalls:  map[string]int{"fmt.Sprintf": 2},
@@ -1323,13 +1323,13 @@ func ProcessData() string {
 	return fmt.Sprintf("result")
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
@@ -1345,13 +1345,13 @@ func ProcessData() {
 	_ = x
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
@@ -1366,13 +1366,13 @@ func ProcessData() {
 	fmt.Println("work")
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Printf": 1, "fmt.Println": 1},
@@ -1387,13 +1387,13 @@ func ProcessData() {
 	fmt.Println("sync")
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == printfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == printfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Printf": 1, "fmt.Println": 1},
@@ -1407,13 +1407,13 @@ func ProcessData(ch chan string) {
 	ch <- fmt.Sprintf("message")
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1},
@@ -1431,13 +1431,13 @@ func ProcessData(ch chan string) {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
@@ -1455,11 +1455,11 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if ident, ok := call.Fun.(*ast.Ident); ok {
-					return ident.Name == "IsPositive"
+					return struct{}{}, ident.Name == "IsPositive"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 1},
@@ -1478,11 +1478,11 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if ident, ok := call.Fun.(*ast.Ident); ok {
-					return ident.Name == "ShouldContinue"
+					return struct{}{}, ident.Name == "ShouldContinue"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Println": 1},
@@ -1501,13 +1501,13 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok {
-						return x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
+						return struct{}{}, x.Name == fmtPackage && sel.Sel.Name == sprintfFuncName
 					}
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Sprintf": 1, "fmt.Println": 2},
@@ -1528,11 +1528,11 @@ func ProcessData() {
 	}
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if ident, ok := call.Fun.(*ast.Ident); ok {
-					return ident.Name == "GetInterface"
+					return struct{}{}, ident.Name == "GetInterface"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Println": 2},
@@ -1552,11 +1552,16 @@ func ProcessData() {
 				FilePath:      filePath,
 			}
 
-			pointIDs, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
+			pointMap, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
 			require.NoError(t, err)
-			require.Len(t, pointIDs, tc.expectedPoints)
+			require.Len(t, pointMap, tc.expectedPoints)
 
 			// Verify point IDs are sequential
+			pointIDs := make([]int, 0, len(pointMap))
+			for id := range pointMap {
+				pointIDs = append(pointIDs, id)
+			}
+			slices.Sort(pointIDs)
 			for i, id := range pointIDs {
 				assert.Equal(t, i, id)
 			}
@@ -1612,9 +1617,9 @@ func ProcessData() {
 			}
 
 			// Verify idempotency
-			pointIDs2, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
+			pointMap2, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
 			require.NoError(t, err)
-			require.Empty(t, pointIDs2)
+			require.Empty(t, pointMap2)
 		})
 	}
 }
@@ -1874,16 +1879,16 @@ func ProcessData(x, y int) {
 	}
 
 	// Inject monitoring before fmt.Printf calls
-	pointIDs, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+	pointMap, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 			if x, ok := sel.X.(*ast.Ident); ok {
-				return x.Name == "fmt" && sel.Sel.Name == "Printf"
+				return struct{}{}, x.Name == "fmt" && sel.Sel.Name == "Printf"
 			}
 		}
-		return false
+		return struct{}{}, false
 	})
 	require.NoError(t, err)
-	require.Len(t, pointIDs, 1)
+	require.Len(t, pointMap, 1)
 
 	require.NoError(t, modifier.CommitFile(filePath))
 
@@ -1960,11 +1965,11 @@ func ProcessData() int {
 			FilePath:      filePath,
 		}
 
-		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
 			if ident, ok := call.Fun.(*ast.Ident); ok {
-				return ident.Name == "first"
+				return struct{}{}, ident.Name == "first"
 			}
-			return false
+			return struct{}{}, false
 		})
 		require.NoError(t, err)
 		require.NoError(t, modifier.CommitFile(filePath))
@@ -2010,11 +2015,11 @@ func Process() {
 			FilePath:      filePath,
 		}
 
-		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
 			if ident, ok := call.Fun.(*ast.Ident); ok {
-				return ident.Name == "helper"
+				return struct{}{}, ident.Name == "helper"
 			}
-			return false
+			return struct{}{}, false
 		})
 		require.NoError(t, err)
 		require.NoError(t, modifier.CommitFile(filePath))
@@ -2058,11 +2063,11 @@ func ProcessData() int {
 			FilePath:      filePath,
 		}
 
-		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
 			if ident, ok := call.Fun.(*ast.Ident); ok {
-				return ident.Name == "addThree"
+				return struct{}{}, ident.Name == "addThree"
 			}
-			return false
+			return struct{}{}, false
 		})
 		require.NoError(t, err)
 		require.NoError(t, modifier.CommitFile(filePath))
@@ -2113,13 +2118,13 @@ func ProcessData() {
 			FilePath:      filePath,
 		}
 
-		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if x, ok := sel.X.(*ast.Ident); ok {
-					return x.Name == "fmt" && sel.Sel.Name == "Printf"
+					return struct{}{}, x.Name == "fmt" && sel.Sel.Name == "Printf"
 				}
 			}
-			return false
+			return struct{}{}, false
 		})
 		require.NoError(t, err)
 		require.NoError(t, modifier.CommitFile(filePath))
@@ -2183,11 +2188,11 @@ func ProcessData() int {
 			FilePath:      filePath,
 		}
 
-		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) bool {
+		_, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				return sel.Sel.Name == "Add"
+				return struct{}{}, sel.Sel.Name == "Add"
 			}
-			return false
+			return struct{}{}, false
 		})
 		require.NoError(t, err)
 		require.NoError(t, modifier.CommitFile(filePath))
@@ -2215,7 +2220,7 @@ func TestInjectFuncPointBeforeCallReceiverCapture(t *testing.T) {
 		name             string
 		src              string
 		funcName         string
-		predicate        func(*ast.CallExpr) bool
+		predicate        func(*ast.CallExpr) (any, bool)
 		expectedReceiver string // Expected receiver name in snapshots
 		expectSynthetic  bool   // Whether to expect synthetic receiver
 		verify           func(*testing.T, []byte)
@@ -2235,11 +2240,11 @@ func ProcessData() {
 	obj.DoWork()
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					return sel.Sel.Name == testMethodDoWork
+					return struct{}{}, sel.Sel.Name == testMethodDoWork
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedReceiver: "obj",
 			expectSynthetic:  false,
@@ -2258,11 +2263,11 @@ func ProcessData() {
 	(&MyStruct{Value: 42}).DoWork()
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					return sel.Sel.Name == testMethodDoWork
+					return struct{}{}, sel.Sel.Name == testMethodDoWork
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedReceiver: "recv",
 			expectSynthetic:  true,
@@ -2282,11 +2287,11 @@ func ProcessData() {
 	obj.Process(1, 2)
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					return sel.Sel.Name == "Process"
+					return struct{}{}, sel.Sel.Name == "Process"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedReceiver: "obj",
 			expectSynthetic:  false,
@@ -2310,11 +2315,11 @@ func ProcessData() {
 	outer.Inner.DoWork()
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					return sel.Sel.Name == testMethodDoWork
+					return struct{}{}, sel.Sel.Name == testMethodDoWork
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedReceiver: "recv",
 			expectSynthetic:  true,
@@ -2331,12 +2336,12 @@ func ProcessData() {
 	_ = result
 }`,
 			funcName: "ProcessData",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				// Match calls to ToUpper (from dot-imported strings package)
 				if ident, ok := call.Fun.(*ast.Ident); ok {
-					return ident.Name == "ToUpper"
+					return struct{}{}, ident.Name == "ToUpper"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedReceiver: "", // No receiver should be captured for package functions
 			expectSynthetic:  false,
@@ -2361,11 +2366,11 @@ func Process() {
 }
 `,
 			funcName: "Process",
-			predicate: func(call *ast.CallExpr) bool {
+			predicate: func(call *ast.CallExpr) (any, bool) {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					return sel.Sel.Name == "DoWork"
+					return struct{}{}, sel.Sel.Name == "DoWork"
 				}
-				return false
+				return struct{}{}, false
 			},
 			expectedReceiver: "recv",
 			expectSynthetic:  true,
@@ -2393,9 +2398,9 @@ func Process() {
 				FilePath:      filePath,
 			}
 
-			pointIDs, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
+			pointMap, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
 			require.NoError(t, err)
-			require.Len(t, pointIDs, 1)
+			require.Len(t, pointMap, 1)
 
 			require.NoError(t, modifier.CommitFile(filePath))
 
