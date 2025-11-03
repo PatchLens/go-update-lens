@@ -7,7 +7,7 @@ toolchain go1.24.2
 require (
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/dgraph-io/ristretto/v2 v2.3.0
-	github.com/go-analyze/bulk v0.1.0
+	github.com/go-analyze/bulk v0.1.1
 	github.com/go-analyze/charts v0.5.21
 	github.com/klauspost/compress v1.18.1
 	github.com/mtraver/base91 v1.0.0
