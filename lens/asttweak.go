@@ -736,8 +736,10 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 					return err
 				}
 
-				block := &ast.BlockStmt{List: append(preStmts, st)}
-				newStmts = append(newStmts, block)
+				// Append instrumentation statements directly to maintain variable scope
+				// Do not wrap in a block as this would scope any variables declared in st
+				newStmts = append(newStmts, preStmts...)
+				newStmts = append(newStmts, st)
 			} else {
 				newStmts = append(newStmts, st)
 			}
