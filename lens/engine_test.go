@@ -104,7 +104,7 @@ func createTestConfig(t *testing.T) *Config {
 	tmpDir := t.TempDir()
 
 	// Create a basic go.mod file
-	goModContent := `module test
+	const goModContent = `module test
 go 1.21
 require github.com/test/module v1.0.0
 `
@@ -1291,8 +1291,8 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		var receivedCallersCount, receivedReachableCount int
 		var receivedIdentEdges map[string][]string
 		provider := &DefaultCallerAnalysisProvider{
-			PostCallerAnalysis: func(packages []*packages.Package, identEdges map[string][]string,
-				moduleChanges []*ModuleFunction,
+			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
+				identEdges map[string][]string, moduleChanges []*ModuleFunction,
 				callers []*CallerFunction, reachable ReachableModuleChange) error {
 				hookCalled = true
 				receivedModuleChanges = moduleChanges
@@ -1328,8 +1328,8 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 
 		expectedErr := errors.New("hook analysis failed")
 		provider := &DefaultCallerAnalysisProvider{
-			PostCallerAnalysis: func(packages []*packages.Package, identEdges map[string][]string,
-				moduleChanges []*ModuleFunction,
+			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
+				identEdges map[string][]string, moduleChanges []*ModuleFunction,
 				callers []*CallerFunction, reachable ReachableModuleChange) error {
 				return expectedErr
 			},
@@ -1344,6 +1344,217 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		assert.Contains(t, err.Error(), "post-caller analysis hook failed")
 		assert.Contains(t, err.Error(), expectedErr.Error())
 	})
+
+	t.Run("project_packages_validated", func(t *testing.T) {
+		t.Parallel()
+
+		projectDir := t.TempDir()
+		gomodcache := t.TempDir()
+
+		// Create the module directory first (will use replace directive)
+		const modName = "example.com/testmod"
+		modDir := filepath.Join(projectDir, "testmod")
+		require.NoError(t, os.MkdirAll(modDir, 0755))
+		modFile := "module " + modName + "\ngo 1.20\n"
+		require.NoError(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(modFile), 0644))
+		const modCode = "package testmod\n\nfunc Foo() int { return 1 }\n"
+		require.NoError(t, os.WriteFile(filepath.Join(modDir, "testmod.go"), []byte(modCode), 0644))
+
+		// Create a project with actual Go code using replace directive
+		const goModContent = `module example.com/testproject
+go 1.21
+require example.com/testmod v1.0.0
+replace example.com/testmod => ./testmod
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "go.mod"), []byte(goModContent), 0644))
+
+		// Create main package
+		const mainCode = `package main
+
+import "example.com/testmod"
+
+func main() {
+	testmod.Foo()
+}
+
+func ProjectFunction() int {
+	return testmod.Foo()
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "main.go"), []byte(mainCode), 0644))
+
+		// Create a subpackage
+		require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "helper"), 0755))
+		helperCode := `package helper
+
+func HelperFunction() string {
+	return "helper"
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "helper", "helper.go"), []byte(helperCode), 0644))
+
+		var receivedProjectPackages []*packages.Package
+		var receivedModulePackages []*packages.Package
+
+		provider := &DefaultCallerAnalysisProvider{
+			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
+				identEdges map[string][]string, moduleChanges []*ModuleFunction,
+				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				receivedProjectPackages = projectPackages
+				receivedModulePackages = modulePackages
+				return nil
+			},
+		}
+
+		config := &Config{
+			ProjectDir:     projectDir,
+			AbsProjDir:     projectDir,
+			Gomodcache:     gomodcache,
+			AstMonitorPort: 44440,
+		}
+
+		moduleChanges := []*ModuleFunction{
+			{Function: Function{
+				FunctionName: "Foo",
+				PackageName:  "testmod",
+			}},
+		}
+
+		_, _, err := provider.PerformCallerStaticAnalysis(*config, moduleChanges)
+		require.NoError(t, err)
+
+		// Validate project packages
+		require.NotNil(t, receivedProjectPackages, "project packages should not be nil")
+		assert.NotEmpty(t, receivedProjectPackages, "project packages should not be empty")
+
+		// Find the main package
+		var mainPkg *packages.Package
+		var helperPkg *packages.Package
+		for _, pkg := range receivedProjectPackages {
+			if pkg.Name == "main" {
+				mainPkg = pkg
+			} else if pkg.Name == "helper" {
+				helperPkg = pkg
+			}
+		}
+
+		require.NotNil(t, mainPkg)
+		assert.Equal(t, "main", mainPkg.Name)
+		assert.Contains(t, mainPkg.PkgPath, "example.com/testproject")
+
+		require.NotNil(t, helperPkg)
+		assert.Equal(t, "helper", helperPkg.Name)
+		assert.Contains(t, helperPkg.PkgPath, "example.com/testproject/helper")
+
+		var testmodPkg *packages.Package
+		for _, pkg := range receivedModulePackages {
+			if pkg.Name == "testmod" {
+				testmodPkg = pkg
+			}
+		}
+		require.NotNil(t, testmodPkg)
+		assert.Equal(t, "testmod", testmodPkg.Name)
+		assert.Equal(t, "example.com/testmod", testmodPkg.PkgPath)
+	})
+
+	t.Run("module_packages_validated", func(t *testing.T) {
+		t.Parallel()
+
+		projectDir := t.TempDir()
+		gomodcache := t.TempDir()
+
+		// Create local module directories (will use replace directives)
+		createLocalModule := func(modName, code string) string {
+			modDir := filepath.Join(projectDir, filepath.Base(modName))
+			require.NoError(t, os.MkdirAll(modDir, 0755))
+			modFile := "module " + modName + "\ngo 1.20\n"
+			require.NoError(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(modFile), 0644))
+			fileName := filepath.Base(modName) + ".go"
+			require.NoError(t, os.WriteFile(filepath.Join(modDir, fileName), []byte(code), 0644))
+			return "./" + filepath.Base(modName)
+		}
+
+		depmodPath := createLocalModule("example.com/depmod", "package depmod\n\nfunc ChangedFunc() int { return 1 }\n")
+		othermodPath := createLocalModule("example.com/othermod", "package othermod\n\nfunc OtherFunc() string { return \"other\" }\n")
+
+		// Create project that uses the modules with replace directives
+		goModContent := `module example.com/myproject
+go 1.21
+require (
+	example.com/depmod v1.0.0
+	example.com/othermod v1.0.0
+)
+replace (
+	example.com/depmod => ` + depmodPath + `
+	example.com/othermod => ` + othermodPath + `
+)
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "go.mod"), []byte(goModContent), 0644))
+
+		const projectCode = `package myproject
+
+import (
+	"example.com/depmod"
+	"example.com/othermod"
+)
+
+func UseModules() {
+	depmod.ChangedFunc()
+	othermod.OtherFunc()
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "myproject.go"), []byte(projectCode), 0644))
+
+		var receivedProjectPackages, receivedModulePackages []*packages.Package
+		provider := &DefaultCallerAnalysisProvider{
+			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
+				identEdges map[string][]string, moduleChanges []*ModuleFunction,
+				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				receivedProjectPackages = projectPackages
+				receivedModulePackages = modulePackages
+				return nil
+			},
+		}
+		config := &Config{
+			ProjectDir:     projectDir,
+			AbsProjDir:     projectDir,
+			Gomodcache:     gomodcache,
+			AstMonitorPort: 44440,
+		}
+		moduleChanges := []*ModuleFunction{
+			{Function: Function{
+				FunctionName: "ChangedFunc",
+				PackageName:  "depmod",
+			}},
+		}
+
+		_, _, err := provider.PerformCallerStaticAnalysis(*config, moduleChanges)
+		require.NoError(t, err)
+
+		var projectPkg *packages.Package
+		for _, pkg := range receivedProjectPackages {
+			if pkg.Name == "myproject" {
+				projectPkg = pkg
+			}
+		}
+		require.NotNil(t, projectPkg)
+		assert.Equal(t, "myproject", projectPkg.Name)
+
+		var depmodPkg *packages.Package
+		for _, pkg := range receivedModulePackages {
+			if pkg.Name == "depmod" {
+				depmodPkg = pkg
+			}
+		}
+
+		require.NotNil(t, depmodPkg)
+		assert.Equal(t, "depmod", depmodPkg.Name)
+		assert.Equal(t, "example.com/depmod", depmodPkg.PkgPath)
+
+		// Verify the module package is loaded correctly with types
+		assert.NotNil(t, depmodPkg.Types)
+		assert.NotNil(t, depmodPkg.TypesInfo)
+	})
 }
 
 func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
@@ -1354,7 +1565,7 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		projectDir := t.TempDir()
 
 		// Create a simple module setup
-		modName := "example.com/testmod"
+		const modName = "example.com/testmod"
 		createModule := func(version, body string) {
 			dir := filepath.Join(gomodcache, modName+"@"+version)
 			require.NoError(t, os.MkdirAll(dir, 0o755))

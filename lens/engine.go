@@ -283,26 +283,28 @@ type DefaultCallerAnalysisProvider struct {
 	// The hook is called once after all project callers have been identified.
 	//
 	// Parameters:
-	//   - packages: Loaded packages with type information from static analysis
+	//   - projectPackages: Project packages with type information from static analysis
+	//   - modulePackages: Module (dependency) packages with type information from static analysis
 	//   - identEdges: Call graph edges mapping function idents to callees
 	//   - moduleChanges: All functions that changed in module updates
 	//   - callers: Project functions that call into changed module functions
 	//   - reachable: Map of which module changes are reachable from project code
 	//
-	// The packages parameter provides access to type information for accurate analysis.
+	// The package parameters provide access to type information for accurate analysis.
+	// Project and module packages are separated to enable targeted analysis.
 	// The identEdges parameter provides a simplified view of the project call graph,
 	// enabling extensions to perform additional reachability analysis without needing
 	// to reload the expensive SSA call graph.
 	//
 	// Returns:
 	//   - error: Any fatal error encountered during analysis.
-	PostCallerAnalysis func(packages []*packages.Package, identEdges map[string][]string,
-		moduleChanges []*ModuleFunction,
+	PostCallerAnalysis func(projectPackages []*packages.Package, modulePackages []*packages.Package,
+		identEdges map[string][]string, moduleChanges []*ModuleFunction,
 		callers []*CallerFunction, reachable ReachableModuleChange) error
 }
 
 func (d *DefaultCallerAnalysisProvider) PerformCallerStaticAnalysis(config Config, moduleChanges []*ModuleFunction) ([]*CallerFunction, ReachableModuleChange, error) {
-	callers, reachable, cg, pkgs, err := CallerStaticAnalysis(moduleChanges, config.AbsProjDir)
+	callers, reachable, cg, projectPkgs, modulePkgs, err := CallerStaticAnalysis(moduleChanges, config.AbsProjDir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -311,7 +313,7 @@ func (d *DefaultCallerAnalysisProvider) PerformCallerStaticAnalysis(config Confi
 		// Only extract edges when hook exists
 		identEdges := extractCallGraphEdges(cg)
 		cg = nil //nolint:ineffassign,wastedassign // Allow GC to collect call graph during hook execution
-		if err := d.PostCallerAnalysis(pkgs, identEdges, moduleChanges, callers, reachable); err != nil {
+		if err := d.PostCallerAnalysis(projectPkgs, modulePkgs, identEdges, moduleChanges, callers, reachable); err != nil {
 			return nil, nil, fmt.Errorf("post-caller analysis hook failed: %w", err)
 		}
 	}

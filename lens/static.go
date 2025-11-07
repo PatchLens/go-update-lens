@@ -25,12 +25,12 @@ const debugCallChain = "" // Set to function name to log call chains with functi
 
 // CallerStaticAnalysis performs static analysis to determine which project functions call
 // the provided moduleChanges. Returned are the functions in the project that may delegate
-// to the updated module functions, along with the call graph and loaded packages with type information.
-func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, []*packages.Package, error) {
+// to the updated module functions, along with the call graph, project packages, and module packages with type information.
+func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, []*packages.Package, []*packages.Package, error) {
 	// Load all non-test packages in the project and build SSA and call-graph using CHA (class hierarchy analysis)
-	cg, _, pkgs, err := LoadProjectCallGraph(projectDir, false)
+	cg, _, projectPkgs, modulePkgs, err := LoadProjectCallGraph(projectDir, false)
 	if err != nil || cg == nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 
 	// Match changed Functions -> *ssa.Function nodes for quick comparison
@@ -108,7 +108,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 		})
 	}
 	if err := eg.Wait(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 
 	result := slices.Collect(maps.Values(callerFuncMap))
@@ -120,7 +120,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([
 		}
 	}
 
-	return result, reachableModuleChanges, cg, pkgs, nil
+	return result, reachableModuleChanges, cg, projectPkgs, modulePkgs, nil
 }
 
 // extractCallGraphEdges converts the SSA call graph into a simple identifier mapping.
@@ -287,13 +287,13 @@ func TestStaticAnalysis(callers []*CallerFunction, projectDir string) ([]*TestFu
 
 // loadProjectPackageCallGraph loads the project packages and creates an SSA Program and call-graph from the packages.
 func loadProjectPackageCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, error) {
-	cg, _, _, err := LoadProjectCallGraph(projectDir, includeTests)
+	cg, _, _, _, err := LoadProjectCallGraph(projectDir, includeTests)
 	return cg, err
 }
 
 // LoadProjectCallGraph loads the project packages and creates an SSA Program and call-graph.
-// Returns the call graph, SSA program, loaded packages, and any error encountered.
-func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, *ssa.Program, []*packages.Package, error) {
+// Returns the call graph, SSA program, project packages, module packages, and any error encountered.
+func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, *ssa.Program, []*packages.Package, []*packages.Package, error) {
 	cfg := &packages.Config{
 		Dir:   projectDir,
 		Tests: includeTests,
@@ -309,7 +309,7 @@ func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Grap
 	if FileExists(workPath) {
 		dirs, err := parseGoWork(workPath)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		for _, d := range dirs {
 			if filepath.IsAbs(d) {
@@ -320,21 +320,29 @@ func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Grap
 		}
 	}
 	if len(patterns) == 0 {
-		return nil, nil, nil, fmt.Errorf("no go.mod or go.work found in %s", projectDir)
+		return nil, nil, nil, nil, fmt.Errorf("no go.mod or go.work found in %s", projectDir)
 	}
 
 	pkgs, err := packages.Load(cfg, patterns...)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	} else if packages.PrintErrors(pkgs) > 0 {
-		return nil, nil, nil, errors.New("project packages contain errors")
+		return nil, nil, nil, nil, errors.New("project packages contain errors")
 	} else if len(pkgs) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	prog := ssa.NewProgram(pkgs[0].Fset, ssa.GlobalDebug)
 
 	created := make(map[*types.Package]*ssa.Package)
+	var modulePkgs []*packages.Package
+
+	// Mark project packages
+	projectPkgSet := make(map[*packages.Package]bool, len(pkgs))
+	for _, p := range pkgs {
+		projectPkgSet[p] = true
+	}
+
 	// Recursive function to create an ssa.Package for pkg, plus all its imports
 	var createAll func(*packages.Package) *ssa.Package
 	createAll = func(p *packages.Package) *ssa.Package {
@@ -342,6 +350,11 @@ func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Grap
 			return nil // If there's no type info, we can't build SSA for it
 		} else if ssaPkg, ok := created[p.Types]; ok {
 			return ssaPkg // Already created
+		}
+
+		// Collect module packages (imported dependencies)
+		if !projectPkgSet[p] {
+			modulePkgs = append(modulePkgs, p)
 		}
 
 		// Create but do not build yet
@@ -362,7 +375,7 @@ func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Grap
 	}
 	prog.Build() // build all packages, will be concurrent unless serial flag is passed
 
-	return cha.CallGraph(prog), prog, pkgs, nil
+	return cha.CallGraph(prog), prog, pkgs, modulePkgs, nil
 }
 
 // filePathForSSAFunc attempts to retrieve the file path of the function’s position.
