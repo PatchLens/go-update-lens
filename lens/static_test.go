@@ -300,7 +300,7 @@ func TestFunctionClassifications(t *testing.T) {
 	t.Parallel()
 
 	// main package with a main function
-	mainPkg := buildSSAPackage(t, "main", map[string]string{
+	mainPkg := buildSSAPackage(t, mainPkg, map[string]string{
 		"main.go": "package main\nfunc main(){}\nfunc other(){}\n",
 	})
 	mainFn := mainPkg.Func("main")

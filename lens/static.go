@@ -614,10 +614,12 @@ func logStackChain(chain []*callgraph.Node) {
 	}
 }
 
+const mainPkg = "main"
+
 // isMainFunction detects standard "func main()" functions.
 func isMainFunction(fn *ssa.Function) bool {
 	return fn != nil && fn.Package() != nil && fn.Signature != nil &&
-		fn.Package().Pkg.Name() == "main" && fn.Name() == "main" &&
+		fn.Package().Pkg.Name() == mainPkg && fn.Name() == "main" &&
 		fn.Signature.Recv() == nil && fn.Signature.Params().Len() == 0
 }
 

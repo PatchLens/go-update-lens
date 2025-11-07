@@ -352,7 +352,7 @@ func Foo() {
 			mod := &ASTModifier{}
 			err := mod.InsertFuncLines(&Function{
 				FilePath:      file,
-				PackageName:   "main",
+				PackageName:   mainPkg,
 				FunctionIdent: "main:Foo",
 				FunctionName:  "Foo",
 			}, func(i int, line string) (string, bool) {

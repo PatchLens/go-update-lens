@@ -576,50 +576,34 @@ func TestAnalyzeModuleChanges(t *testing.T) {
 	t.Parallel()
 
 	t.Run("basic_change_detection_no_hook", func(t *testing.T) {
-		gomodcache := t.TempDir()
+		gomodcache, addVersion := setupTestModuleEnv(t)
 		projectDir := t.TempDir()
-		const modName = "example.com/hello"
-		createModule := func(version, body string) {
-			dir := filepath.Join(gomodcache, modName+"@"+version)
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			modFile := "module " + modName + "\n\ngo 1.20\n"
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "hello.go"), []byte(body), 0o644))
-		}
 
-		createModule("v1.0.0", "package hello\n\nfunc Foo() int { return 1 }\n")
-		createModule("v1.1.0", "package hello\n\nfunc Foo() int { return 2 }\n")
+		addVersion("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
+		addVersion("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
 
-		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
 		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, nil)
 		require.NoError(t, err)
 		require.Len(t, checked, 1)
-		assert.Equal(t, modName, checked[0])
+		assert.Equal(t, testModName, checked[0])
 		require.Len(t, funcs, 1)
 		assert.Equal(t, "Foo", funcs[0].FunctionName)
 		assert.Contains(t, funcs[0].Definition, "return 1")
 	})
 
 	t.Run("hook_collects_all_functions", func(t *testing.T) {
-		gomodcache := t.TempDir()
+		gomodcache, addVersion := setupTestModuleEnv(t)
 		projectDir := t.TempDir()
-		const modName = "example.com/multi"
-		createModule := func(version, body string) {
-			dir := filepath.Join(gomodcache, modName+"@"+version)
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			modFile := "module " + modName + "\n\ngo 1.20\n"
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "multi.go"), []byte(body), 0o644))
-		}
 
 		// Old version has 2 functions
-		createModule("v1.0.0", `package multi
+		addVersion("v1.0.0", `package testmod
 
 func Foo() int { return 1 }
 func Bar() int { return 10 }
 `)
 		// New version: Foo changed, Bar unchanged, Baz added
-		createModule("v1.1.0", `package multi
+		addVersion("v1.1.0", `package testmod
 
 func Foo() int { return 2 }
 func Bar() int { return 10 }
@@ -628,7 +612,7 @@ func Baz() int { return 30 }
 
 		var hookCalled bool
 		var hookData []ModuleAnalysisData
-		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
 		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
 			hookCalled = true
 			hookData = data
@@ -640,7 +624,7 @@ func Baz() int { return 30 }
 		require.Len(t, hookData, 1)
 
 		// Check ModuleAnalysisData structure
-		assert.Equal(t, modName, hookData[0].ModuleChange.Name)
+		assert.Equal(t, testModName, hookData[0].ModuleChange.Name)
 		assert.Equal(t, "v1.0.0", hookData[0].ModuleChange.PriorVersion)
 		assert.Equal(t, "v1.1.0", hookData[0].ModuleChange.NewVersion)
 
@@ -652,25 +636,17 @@ func Baz() int { return 30 }
 		require.Len(t, funcs, 1)
 		assert.Equal(t, "Foo", funcs[0].FunctionName)
 		require.Len(t, checked, 1)
-		assert.Equal(t, modName, checked[0])
+		assert.Equal(t, testModName, checked[0])
 	})
 
 	t.Run("hook_error_propagates", func(t *testing.T) {
-		gomodcache := t.TempDir()
+		gomodcache, addVersion := setupTestModuleEnv(t)
 		projectDir := t.TempDir()
-		const modName = "example.com/error"
-		createModule := func(version, body string) {
-			dir := filepath.Join(gomodcache, modName+"@"+version)
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			modFile := "module " + modName + "\n\ngo 1.20\n"
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(body), 0o644))
-		}
 
-		createModule("v1.0.0", "package error\n\nfunc Test() int { return 1 }\n")
-		createModule("v1.1.0", "package error\n\nfunc Test() int { return 2 }\n")
+		addVersion("v1.0.0", "package testmod\n\nfunc Test() int { return 1 }\n")
+		addVersion("v1.1.0", "package testmod\n\nfunc Test() int { return 2 }\n")
 
-		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
 		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
 			return errors.New("test hook error")
 		})
@@ -727,25 +703,16 @@ func Baz() int { return 30 }
 	})
 
 	t.Run("no_changes", func(t *testing.T) {
-		gomodcache := t.TempDir()
+		gomodcache, addVersion := setupTestModuleEnv(t)
 		projectDir := t.TempDir()
-		const modName = "example.com/nochange"
-
-		createModule := func(version, body string) {
-			dir := filepath.Join(gomodcache, modName+"@"+version)
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			modFile := "module " + modName + "\n\ngo 1.20\n"
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte(body), 0o644))
-		}
 
 		// Same code in both versions
-		sameCode := "package nochange\n\nfunc Same() int { return 42 }\n"
-		createModule("v1.0.0", sameCode)
-		createModule("v1.1.0", sameCode)
+		sameCode := "package testmod\n\nfunc Same() int { return 42 }\n"
+		addVersion("v1.0.0", sameCode)
+		addVersion("v1.1.0", sameCode)
 
 		var hookData []ModuleAnalysisData
-		mods := []ModuleChange{{Name: modName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
 		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
 			hookData = data
 			return nil
@@ -881,5 +848,24 @@ func TestProjectPackagePatterns(t *testing.T) {
 			require.NoError(t, err)
 			assert.ElementsMatch(t, tt.want, got)
 		})
+	}
+}
+
+const testModName = "example.com/testmod"
+
+// setupTestModuleEnv creates a test module environment with a gomodcache directory.
+// Returns the gomodcache path and a function to add "example.com/testmod" module versions to it.
+func setupTestModuleEnv(t *testing.T) (string, func(version, sourceCode string)) {
+	t.Helper()
+
+	gomodcache := t.TempDir()
+
+	return gomodcache, func(version, sourceCode string) {
+		dir := filepath.Join(gomodcache, testModName+"@"+version)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+
+		modFile := "module " + testModName + "\n\ngo 1.24\n"
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "testmod.go"), []byte(sourceCode), 0o644))
 	}
 }

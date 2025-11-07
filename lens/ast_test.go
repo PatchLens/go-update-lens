@@ -633,7 +633,7 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 				ident = "main:" + tc.fnName
 			}
 			_, err = tc.inject(mod, &Function{
-				PackageName:   "main",
+				PackageName:   mainPkg,
 				FilePath:      mainPath,
 				FunctionName:  tc.fnName,
 				FunctionIdent: ident,
@@ -769,7 +769,7 @@ func main() {
 
 	// Inject regular monitoring on Target function
 	targetFunc := &Function{
-		PackageName:   "main",
+		PackageName:   mainPkg,
 		FilePath:      mainPath,
 		FunctionName:  "Target",
 		FunctionIdent: "main:Target",
@@ -779,7 +779,7 @@ func main() {
 
 	// Inject extension monitoring on Helper function (simulating security sink monitoring)
 	helperFunc := &Function{
-		PackageName:   "main",
+		PackageName:   mainPkg,
 		FilePath:      mainPath,
 		FunctionName:  "Helper",
 		FunctionIdent: "main:Helper",
