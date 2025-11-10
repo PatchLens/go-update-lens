@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
+	"golang.org/x/mod/module"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/mtraver/base91"
@@ -33,13 +34,27 @@ const (
 	testFailStr            = "FAIL"
 )
 
+// postUpdateExtensionContext holds context for post-update extension configuration.
+type postUpdateExtensionContext struct {
+	config          func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)
+	changedModules  []ModuleChange
+	newVersionPaths map[string][]string
+}
+
 // RunModuleUpdateAnalysis modifies the project and modules AST to include hooks for calls into the AST client.
 // Our astServer accepts these calls, and invokes back into our code here so that we can analyze the project execution.
+//
+// Extension point configurations allow custom monitoring to be injected into module code:
+//   - preUpdateExtensionConfig: Called before first test run with old version module functions
+//   - postUpdateExtensionConfig: Called before second test run with new version package paths
+//
+// Both hooks are optional (can be nil). The returned point IDs from both are merged for monitoring.
 func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart int,
 	storage Storage, maxVariableRecurse, maxFieldLen int, // values impact memory usage
 	changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
 	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	extensionPointConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error)) (int, int, Storage, Storage, error) {
+	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error) {
 	env := GoEnv(gopath, gomodcache)
 
 	if err := goCacheClean(env); err != nil { // will be cleaned at the end of each analysis also
@@ -71,7 +86,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	projectFieldChecks1, moduleChangesReached, err :=
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			nil, preStorage,
-			slices.Collect(maps.Values(reachableModuleChanges)), callingFunctions, testFunctions, extensionPointConfig)
+			slices.Collect(maps.Values(reachableModuleChanges)), callingFunctions, testFunctions, preUpdateExtensionConfig, nil)
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, nil, nil, err
 	}
@@ -126,11 +141,25 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 
 	// capture stable fields after module update
 	postStorage := KeyPrefixStorage(storage, "post")
+
+	// Compute new version package paths for post-update extension config
+	var newVersionPaths map[string][]string
+	if postUpdateExtensionConfig != nil {
+		newVersionPaths, err = computeNewVersionPackagePaths(changedModules, gomodcache)
+		if err != nil {
+			return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
+		}
+	}
+
 	projectFieldChecks2, _, err :=
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			preStorage, postStorage,
 			nil, // module change function definitions are not valid for the updated version
-			callingFunctions, testFunctions, extensionPointConfig)
+			callingFunctions, testFunctions, nil, &postUpdateExtensionContext{
+				config:          postUpdateExtensionConfig,
+				changedModules:  changedModules,
+				newVersionPaths: newVersionPaths,
+			})
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
 	}
@@ -138,10 +167,12 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	// RESTORE original go.mod & go.sum for each module
 	for _, b := range backups {
 		if err := os.Rename(b.modBkp, b.modPath); err != nil {
-			log.Printf("WARN: Failed to restore %s: %v", b.modPath, err)
+			return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+				fmt.Errorf("failed to restore %s: %w", b.modPath, err)
 		} else if b.sumPath != "" {
 			if err := os.Rename(b.sumBkp, b.sumPath); err != nil {
-				log.Printf("WARN: Failed to restore %s: %v", b.sumPath, err)
+				return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+					fmt.Errorf("failed to restore %s: %w", b.modPath, err)
 			}
 		}
 	}
@@ -149,10 +180,63 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	return max(projectFieldChecks1, projectFieldChecks2), moduleChangesReached, preStorage, postStorage, nil
 }
 
+// computeNewVersionPackagePaths calculates the package paths for modules at their new versions.
+// This enables post-update extension points to locate and inject into new version packages.
+func computeNewVersionPackagePaths(changes []ModuleChange, gomodcache string) (map[string][]string, error) {
+	result := make(map[string][]string)
+
+	for _, change := range changes {
+		// Compute expected path for new version in GOMODCACHE using proper encoding
+		// Go's module cache uses case-sensitive encoding with "!" for uppercase letters
+		// e.g., github.com/Azure/lib@v2.0.0 -> /go/pkg/mod/github.com/!azure/lib@v2.0.0
+		escapedPath, err := module.EscapePath(change.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to escape module path %s: %w", change.Name, err)
+		}
+		modPath := escapedPath + "@" + change.NewVersion
+		fullPath := filepath.Join(gomodcache, filepath.FromSlash(modPath))
+
+		// Find all Go packages within this module
+		var pkgPaths []string
+		_ = filepath.Walk(fullPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // Skip inaccessible paths
+			}
+			if info.IsDir() && containsGoFiles(path) {
+				pkgPaths = append(pkgPaths, path)
+			}
+			return nil
+		})
+
+		if len(pkgPaths) > 0 {
+			result[change.Name] = pkgPaths
+			log.Printf("Found %d packages for %s@%s", len(pkgPaths), change.Name, change.NewVersion)
+		}
+	}
+
+	return result, nil
+}
+
+// containsGoFiles checks if a directory contains any non-test Go files.
+func containsGoFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") &&
+			!strings.HasSuffix(entry.Name(), "_test.go") {
+			return true
+		}
+	}
+	return false
+}
+
 func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	srvChan chan *astServer, goroot, projectDir string, stableResultsStorage Storage, storage Storage,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction,
-	extensionPointConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error)) (int, int, error) {
+	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
+	postUpdateExtensionCtx *postUpdateExtensionContext) (int, int, error) {
 	astEditor := &ASTModifier{}
 	defer func() {
 		errs := astEditor.Restore(env)
@@ -162,10 +246,18 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	}()
 
 	projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent, err :=
-		injectMonitorPoints(astEditor, maxVariableRecurse, maxFieldLen, moduleChanges, callerFunctions, extensionPointConfig)
+		injectMonitorPoints(astEditor, maxVariableRecurse, maxFieldLen, moduleChanges, callerFunctions, preUpdateExtensionConfig, postUpdateExtensionCtx)
 	if err != nil {
 		return 0, 0, err
 	}
+
+	// Clear build cache after extension point injection to ensure Go picks up any newly injected files in GOMODCACHE
+	if postUpdateExtensionCtx != nil && postUpdateExtensionCtx.config != nil {
+		if err := goCacheClean(env); err != nil {
+			return 0, 0, fmt.Errorf("failed to cleanup post update extension cache: %w", err)
+		}
+	}
+
 	if err := astEditor.Commit(); err != nil {
 		return 0, 0, err
 	}
@@ -257,7 +349,8 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 
 func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen int,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction,
-	extensionPointConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error)) (
+	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
+	postUpdateExtensionCtx *postUpdateExtensionContext) (
 	map[int]*string, map[int]*string, map[int]*string, map[int]*string, map[int]*string, error) {
 	pointIdLock := sync.Mutex{}
 	projectStatePointIdToIdent := make(map[int]*string)
@@ -426,14 +519,34 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 	}
 
 	var extensionStatePointIdToIdent map[int]*string
-	if extensionPointConfig != nil {
+
+	// Handle pre-update extension config (old version)
+	if preUpdateExtensionConfig != nil {
 		var err error
-		extensionStatePointIdToIdent, err = extensionPointConfig(astEditor, moduleChanges, callerFunctions)
+		extensionStatePointIdToIdent, err = preUpdateExtensionConfig(astEditor, moduleChanges, callerFunctions)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("extension point configuration failed: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("pre-update extension point configuration failed: %w", err)
 		}
 		if len(extensionStatePointIdToIdent) > 0 {
-			log.Printf("Extension points configured: %d", len(extensionStatePointIdToIdent))
+			log.Printf("Pre-update extension points configured: %d", len(extensionStatePointIdToIdent))
+		}
+	}
+
+	// Handle post-update extension config (new version)
+	if postUpdateExtensionCtx != nil && postUpdateExtensionCtx.config != nil {
+		postExtensionPoints, err := postUpdateExtensionCtx.config(astEditor, postUpdateExtensionCtx.changedModules, postUpdateExtensionCtx.newVersionPaths)
+		if err != nil {
+			return nil, nil, nil, nil, nil, fmt.Errorf("post-update extension point configuration failed: %w", err)
+		}
+		if len(postExtensionPoints) > 0 {
+			log.Printf("Post-update extension points configured: %d", len(postExtensionPoints))
+		}
+
+		// Merge post-update extension points with pre-update points
+		if extensionStatePointIdToIdent == nil {
+			extensionStatePointIdToIdent = postExtensionPoints
+		} else {
+			maps.Insert(extensionStatePointIdToIdent, maps.All(postExtensionPoints))
 		}
 	}
 
@@ -741,21 +854,16 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 			t.extensionFramesMu.Lock()
 			defer t.extensionFramesMu.Unlock()
 
-			var stable map[string][]CallFrame
-			if t.stableResults != nil {
-				stable = t.stableResults.extension
-			}
-			applyStableFilter(stable, t.extensionFrames)
+			// Can't use applyStableFilter, extension points may be in module code that changes between versions
+			// Stability only provided from same-version comparison (via testResultStableFields)
 			recordedAppend(t.extensionFrames)
 		} else {
 			t.callerFramesMu.Lock()
 			defer t.callerFramesMu.Unlock()
 
-			var stable map[string][]CallFrame
 			if t.stableResults != nil {
-				stable = t.stableResults.caller
+				applyStableFilter(t.stableResults.caller, t.callerFrames)
 			}
-			applyStableFilter(stable, t.callerFrames)
 			recordedAppend(t.callerFrames)
 		}
 	}()
@@ -842,7 +950,7 @@ func testResultStableFields(r1, r2 TestResult) TestResult {
 	var bb bytes.Buffer
 
 	// Helper function to compute stable frames from two frame maps
-	computeStableFrames := func(frames1Map, frames2Map map[string][]CallFrame) map[string][]CallFrame {
+	computeStableFrames := func(frames1Map, frames2Map map[string][]CallFrame, useProjectFramesOnly bool) map[string][]CallFrame {
 		result := make(map[string][]CallFrame, len(frames1Map))
 		for ident, frames1 := range frames1Map {
 			frames2, ok := frames2Map[ident]
@@ -863,13 +971,21 @@ func testResultStableFields(r1, r2 TestResult) TestResult {
 			slices.SortStableFunc(frames2, callFrameSortFunc)
 
 			frames2ByKey := bulk.SliceToGroupsBy(func(f CallFrame) string {
-				return StackFramesKey(&bb, ProjectFrames(f.Stack))
+				stack := f.Stack
+				if useProjectFramesOnly {
+					stack = ProjectFrames(stack)
+				}
+				return StackFramesKey(&bb, stack)
 			}, frames2)
 
 			used := make(map[string]int, len(frames1))
 			commonFrames := make([]CallFrame, 0, len(frames1))
 			for _, frame1 := range frames1 {
-				key := StackFramesKey(&bb, ProjectFrames(frame1.Stack))
+				stack := frame1.Stack
+				if useProjectFramesOnly {
+					stack = ProjectFrames(stack)
+				}
+				key := StackFramesKey(&bb, stack)
 				idx := used[key]
 				used[key] = idx + 1
 				if idx >= len(frames2ByKey[key]) {
@@ -891,8 +1007,8 @@ func testResultStableFields(r1, r2 TestResult) TestResult {
 		return result
 	}
 
-	commonCallerResults := computeStableFrames(r1.CallerResults, r2.CallerResults)
-	commonExtensionFrames := computeStableFrames(r1.ExtensionFrames, r2.ExtensionFrames)
+	commonCallerResults := computeStableFrames(r1.CallerResults, r2.CallerResults, true)
+	commonExtensionFrames := computeStableFrames(r1.ExtensionFrames, r2.ExtensionFrames, false)
 
 	intersectPanics := func(m1, m2 map[string][]string) map[string][]string {
 		out := make(map[string][]string, len(m1))

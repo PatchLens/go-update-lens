@@ -58,7 +58,9 @@ type mockUpdateAnalysisProvider struct {
 
 func (m *mockUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config, storage Storage,
 	changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
+	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error) {
 	return m.projectFieldChecks, m.moduleChangesReachedInTesting, m.preResults, m.postResults, m.err
 }
 

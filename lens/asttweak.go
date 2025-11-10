@@ -598,7 +598,6 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 //
 // Returns a map from point ID to caller-provided metadata for all injection points.
 func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) (metadata any, inject bool)) (map[int]any, error) {
-	const modificationMarker = "patchlens:before-call"
 	lock := astFileLock.Lock(fn.FilePath)
 	defer lock.Unlock()
 
@@ -609,8 +608,6 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	funcDecl := findFuncDecl(fileNode, fn.PackageName, fn.FunctionIdent)
 	if funcDecl == nil || funcDecl.Body == nil {
 		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionName, fn.FilePath)
-	} else if hasPatchlensMarker(funcDecl, modificationMarker) {
-		return map[int]any{}, nil // already inserted
 	}
 	filePackageNames := make(map[string]bool, len(fileNode.Imports))
 	for _, imp := range fileNode.Imports {
@@ -628,6 +625,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 
 	pointMap := make(map[int]any)
 	var buf bytes.Buffer
+
 	// Helper to find a matching call in a node, returns the call and its metadata if found
 	findMatchingCall := func(node ast.Node) (*ast.CallExpr, any) {
 		var matchedCall *ast.CallExpr
@@ -649,6 +647,11 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	rewriteBlock = func(blk *ast.BlockStmt) error {
 		newStmts := make([]ast.Stmt, 0, len(blk.List))
 		for _, st := range blk.List {
+			if isPrevStmtSendLensPoint(newStmts, len(newStmts)) { // Skip if already instrumented
+				newStmts = append(newStmts, st)
+				continue
+			}
+
 			// Check if this statement contains a matching call (excluding nested blocks)
 			var matchedCall *ast.CallExpr
 			var metadata any
@@ -840,15 +843,6 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		return nil, fmt.Errorf("ast rewrite failure %s: %w", fn.FilePath, err)
 	}
 
-	// Mark as updated
-	if funcDecl.Doc == nil {
-		funcDecl.Doc = &ast.CommentGroup{}
-	}
-	funcDecl.Doc.List = append(funcDecl.Doc.List, &ast.Comment{
-		Slash: funcDecl.Pos() - 1,
-		Text:  "// " + modificationMarker,
-	})
-
 	return pointMap, nil
 }
 
@@ -968,6 +962,26 @@ func buildTypesInfo(fset *token.FileSet, targetFile *ast.File) *types.Info {
 		return nil
 	}
 	return info
+}
+
+// isPrevStmtSendLensPoint checks if the previous statement in the slice (at idx-1)
+// is a SendLensPointStateMessage call, indicating that the current statement
+// has already been instrumented.
+func isPrevStmtSendLensPoint(stmts []ast.Stmt, idx int) bool {
+	if idx == 0 {
+		return false
+	}
+	prev := stmts[idx-1]
+	exprStmt, ok := prev.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := exprStmt.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	return ok && ident.Name == "SendLensPointStateMessage"
 }
 
 // visibleDeclsBefore collects visible identifiers before retPos using a syntactic scan.

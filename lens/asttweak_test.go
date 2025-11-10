@@ -18,6 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const sendLensPointStateMessageFunc = "SendLensPointStateMessage"
+
 func countFunctionCalls(t *testing.T, src []byte, funcName string) int {
 	t.Helper()
 
@@ -1577,9 +1579,9 @@ func ProcessData() {
 			modFile, err := parser.ParseFile(fset, filePath, nil, 0)
 			require.NoError(t, err)
 
-			// Verify modification marker
+			// Verify monitoring calls are present (no longer check for marker since it's removed)
 			if tc.expectedPoints > 0 {
-				assert.Contains(t, modifiedStr, "patchlens:before-call")
+				assert.Contains(t, modifiedStr, sendLensPointStateMessageFunc)
 			}
 
 			// Find function and count calls
@@ -1597,7 +1599,7 @@ func ProcessData() {
 			callCounts := make(map[string]int)
 			ast.Inspect(funcDecl, func(n ast.Node) bool {
 				if call, ok := n.(*ast.CallExpr); ok {
-					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "SendLensPointStateMessage" {
+					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == sendLensPointStateMessageFunc {
 						monitoringCount++
 					}
 					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
@@ -1616,12 +1618,167 @@ func ProcessData() {
 				assert.Equal(t, expectedCount, callCounts[fnName])
 			}
 
-			// Verify idempotency
+			// Verify idempotency - calling again with same predicate should not re-instrument
 			pointMap2, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
 			require.NoError(t, err)
-			require.Empty(t, pointMap2)
+			require.Empty(t, pointMap2, "Second call with same predicate should return empty map")
 		})
 	}
+}
+
+func TestInjectFuncPointBeforeCallMultipleSinks(t *testing.T) {
+	t.Parallel()
+
+	// Test that we can call InjectFuncPointBeforeCall multiple times with different predicates
+	// to instrument different security sinks in the same function
+	src := `package testpkg
+import (
+	"fmt"
+	"os"
+	"os/exec"
+)
+
+func ProcessData(path, cmd string) {
+	// Security sink 1: file system access
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Security sink 2: command execution
+	output, err := exec.Command("sh", "-c", cmd).Output()
+	if err != nil {
+		return
+	}
+
+	// Regular output (not a security sink)
+	fmt.Println(string(output))
+}
+`
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test.go")
+	require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+	modifier := &ASTModifier{}
+	fn := Function{
+		FunctionIdent: "testpkg:ProcessData",
+		FunctionName:  "ProcessData",
+		PackageName:   "testpkg",
+		FilePath:      filePath,
+	}
+
+	// First call: instrument os.Open (filesystem access sink)
+	pointMap1, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok {
+				if x.Name == "os" && sel.Sel.Name == "Open" {
+					return "filesystem:open", true
+				}
+			}
+		}
+		return nil, false
+	})
+	require.NoError(t, err)
+	require.Len(t, pointMap1, 1)
+
+	var fsOpenPointID int
+	for id := range pointMap1 {
+		fsOpenPointID = id
+	}
+
+	// Commit the first set of changes
+	require.NoError(t, modifier.CommitFile(filePath))
+
+	// Second call: instrument exec.Command (command execution sink)
+	pointMap2, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok {
+				if x.Name == "exec" && sel.Sel.Name == "Command" {
+					return "exec:command", true
+				}
+			}
+		}
+		return nil, false
+	})
+	require.NoError(t, err)
+	require.Len(t, pointMap2, 1)
+
+	var execCmdPointID int
+	for id := range pointMap2 {
+		execCmdPointID = id
+	}
+
+	// Point IDs should be different
+	require.NotEqual(t, fsOpenPointID, execCmdPointID)
+
+	// Commit the second set of changes
+	require.NoError(t, modifier.CommitFile(filePath))
+
+	// Read and verify the modified file
+	modifiedSrc, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	modifiedStr := string(modifiedSrc)
+
+	// Verify both instrumentation points are present
+	assert.Contains(t, modifiedStr, sendLensPointStateMessageFunc)
+
+	// Parse and count monitoring calls
+	fset := token.NewFileSet()
+	modFile, err := parser.ParseFile(fset, filePath, nil, 0)
+	require.NoError(t, err)
+
+	var funcDecl *ast.FuncDecl
+	for _, decl := range modFile.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "ProcessData" {
+			funcDecl = fd
+			break
+		}
+	}
+	require.NotNil(t, funcDecl)
+
+	// Count monitoring calls and verify both are present
+	monitoringCalls := 0
+	foundPointIDs := make(map[int]bool)
+	ast.Inspect(funcDecl, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == sendLensPointStateMessageFunc {
+				monitoringCalls++
+				// Extract point ID from first argument
+				if len(call.Args) > 0 {
+					if lit, ok := call.Args[0].(*ast.BasicLit); ok {
+						if id, err := strconv.Atoi(lit.Value); err == nil {
+							foundPointIDs[id] = true
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	assert.Equal(t, 2, monitoringCalls)
+	assert.True(t, foundPointIDs[fsOpenPointID])
+	assert.True(t, foundPointIDs[execCmdPointID])
+
+	// Verify original calls are preserved
+	assert.Contains(t, modifiedStr, "os.Open")
+	assert.Contains(t, modifiedStr, "exec.Command")
+	assert.Contains(t, modifiedStr, "fmt.Println")
+
+	// Third call: try to re-instrument os.Open - should be idempotent
+	pointMap3, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok {
+				if x.Name == "os" && sel.Sel.Name == "Open" {
+					return "filesystem:open", true
+				}
+			}
+		}
+		return nil, false
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pointMap3)
 }
 
 func TestBuildCallInstrumentationWithArgs(t *testing.T) {
@@ -1718,7 +1875,7 @@ import "fmt"
 			// Verify the function being called is SendLensPointStateMessage
 			funIdent, ok := monitorCall.Fun.(*ast.Ident)
 			require.True(t, ok)
-			assert.Equal(t, "SendLensPointStateMessage", funIdent.Name)
+			assert.Equal(t, sendLensPointStateMessageFunc, funIdent.Name)
 
 			// Verify point ID (first argument)
 			require.NotEmpty(t, monitorCall.Args)
@@ -1857,7 +2014,7 @@ func TestMakeSnapshotLitWithArgPrefix(t *testing.T) {
 func TestInjectFuncPointBeforeCallArgCapture(t *testing.T) {
 	t.Parallel()
 
-	const monitorFuncName = "SendLensPointStateMessage"
+	const monitorFuncName = sendLensPointStateMessageFunc
 	// Integration test: verify that InjectFuncPointBeforeCall uses the arg naming convention
 	src := `package testpkg
 import "fmt"
@@ -2383,7 +2540,7 @@ func Process() {
 		},
 	}
 
-	const monitorFuncName = "SendLensPointStateMessage"
+	const monitorFuncName = sendLensPointStateMessageFunc
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -2542,7 +2699,7 @@ func TestBuildCallInstrumentationWithReceiver(t *testing.T) {
 			// Verify function name
 			funIdent, ok := monitorCall.Fun.(*ast.Ident)
 			require.True(t, ok)
-			assert.Equal(t, "SendLensPointStateMessage", funIdent.Name)
+			assert.Equal(t, sendLensPointStateMessageFunc, funIdent.Name)
 
 			// Count snapshots (excluding point ID)
 			snapshotCount := len(monitorCall.Args) - 1

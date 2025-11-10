@@ -136,7 +136,9 @@ type UpdateAnalysisProvider interface {
 	//   - Storage: post-update test results storage
 	//   - error: any error encountered during analysis
 	RunModuleUpdateAnalysis(config Config, storage Storage, changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-		callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error)
+		callingFunctions []*CallerFunction, testFunctions []*TestFunction,
+		preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
+		postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error)
 
 	// Cleanup is invoked after engine analysis is complete, allowing freeing of resources used during update analysis.
 	Cleanup()
@@ -334,19 +336,35 @@ func (d *DefaultTestProvider) Cleanup() {}
 
 // DefaultUpdateAnalysisProvider provides the standard implementation of UpdateAnalysisProvider.
 type DefaultUpdateAnalysisProvider struct {
-	// ExtensionPointConfig is an optional function that extensions can use to inject additional
-	// monitoring points during AST instrumentation. The function receives the ASTModifier and
-	// changed module/caller functions, and returns a map of point IDs to frame keys for storage.
-	// The returned map is used to route LensMonitorMessagePointState events to ExtensionFrames.
-	ExtensionPointConfig func(astEditor *ASTModifier, moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction) (map[int]*string, error)
+	// PreUpdateExtensionConfig is an optional function called before the first test run (old module version).
+	// It receives old version module functions and can inject monitoring points into them.
+	// Returns a map of point IDs to frame keys for storage.
+	PreUpdateExtensionConfig func(astEditor *ASTModifier, oldVersionFunctions []*ModuleFunction, callerFunctions []*CallerFunction) (map[int]*string, error)
+
+	// PostUpdateExtensionConfig is an optional function called before the second test run (new module version).
+	// It receives module version information and package paths for new versions.
+	// Returns a map of point IDs to frame keys for storage.
+	PostUpdateExtensionConfig func(astEditor *ASTModifier, changedModules []ModuleChange, newVersionPaths map[string][]string) (map[int]*string, error)
 }
 
 func (d *DefaultUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config,
 	storage Storage, changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
+	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error) {
+	// Use provided extension configs if available, otherwise fall back to struct fields
+	preConfig := preUpdateExtensionConfig
+	if preConfig == nil {
+		preConfig = d.PreUpdateExtensionConfig
+	}
+	postConfig := postUpdateExtensionConfig
+	if postConfig == nil {
+		postConfig = d.PostUpdateExtensionConfig
+	}
+
 	return RunModuleUpdateAnalysis(config.Gopath, config.Gomodcache, config.AbsProjDir, config.AstMonitorPort,
 		storage, config.MaxFieldRecurse, config.MaxFieldLen,
-		changedModules, reachableModuleChanges, callingFunctions, testFunctions, d.ExtensionPointConfig)
+		changedModules, reachableModuleChanges, callingFunctions, testFunctions, preConfig, postConfig)
 }
 
 func (d *DefaultUpdateAnalysisProvider) Cleanup() {}
@@ -890,7 +908,7 @@ func (e *AnalysisEngine) Run() error {
 	defer storage.Close()
 	projectFieldChecks, moduleChangesReachedInTesting, preResults, postResults, err :=
 		e.UpdateAnalysisProvider.RunModuleUpdateAnalysis(*e.Config, storage,
-			initialModules.changedModules, reachableModuleChanges, callingFunctions, testFunctions)
+			initialModules.changedModules, reachableModuleChanges, callingFunctions, testFunctions, nil, nil)
 	if err != nil {
 		return fmt.Errorf("error during monitored test execution: %w", err)
 	}
