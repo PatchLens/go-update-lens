@@ -726,3 +726,93 @@ func computeChangeLineBitmap(oldDef, newDef string, newFunc bool, neighbourRadiu
 
 	return bitmap
 }
+
+// ExtractModuleFunctionsFromPackages parses Go packages and extracts function definitions.
+// This is useful for extension configs that need to analyze new module versions.
+//
+// Parameters:
+//   - pkgPaths: Directory paths containing Go packages to analyze
+//   - moduleChange: Module version information to associate with extracted functions
+//
+// Returns a slice of ModuleFunction structs with function definitions, or an error.
+func ExtractModuleFunctionsFromPackages(pkgPaths []string, moduleChange *ModuleChange) ([]*ModuleFunction, error) {
+	if len(pkgPaths) == 0 {
+		return nil, nil
+	}
+
+	// Load packages using go/packages
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Dir:  pkgPaths[0], // Use first path as working directory
+	}
+
+	pkgs, err := packages.Load(cfg, pkgPaths...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load packages: %w", err)
+	}
+
+	if len(pkgs) == 0 {
+		return nil, fmt.Errorf("no packages found in paths: %v", pkgPaths)
+	}
+
+	var functions []*ModuleFunction
+	var buf bytes.Buffer
+
+	for _, pkg := range pkgs {
+		// Skip packages with errors unless we have some valid files
+		if len(pkg.Errors) > 0 && len(pkg.Syntax) == 0 {
+			if logModuleErrors {
+				log.Printf("Package %s has errors: %v", pkg.PkgPath, pkg.Errors)
+			}
+			continue
+		}
+
+		// Process each file in the package
+		for _, file := range pkg.Syntax {
+			filePath := pkg.Fset.File(file.Pos()).Name()
+
+			// Walk the AST to find function declarations
+			for _, decl := range file.Decls {
+				funcDecl, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+
+				// Extract function definition
+				p := &printer.Config{
+					Mode:     printer.TabIndent,
+					Tabwidth: 2,
+				}
+				buf.Reset()
+				if err := p.Fprint(&buf, pkg.Fset, funcDecl); err != nil {
+					if logModuleErrors {
+						log.Printf("Failed to print function %s: %v", funcDecl.Name.Name, err)
+					}
+					continue
+				}
+
+				// Analyze function return points
+				entryLineNumber, returnPoints, endsInPanic := AnalyzeASTFunctionReturnPoints(pkg.Fset, funcDecl)
+
+				// Create function identifier
+				funcIdent := MakeFunctionIdent(pkg.PkgPath, funcDecl)
+
+				functions = append(functions, &ModuleFunction{
+					Function: Function{
+						FilePath:        filePath,
+						PackageName:     pkg.PkgPath,
+						FunctionIdent:   funcIdent,
+						FunctionName:    funcDecl.Name.Name,
+						EntryLineNumber: entryLineNumber,
+						ReturnPoints:    returnPoints,
+						ReturnPanic:     endsInPanic,
+					},
+					Definition: buf.String(),
+					Module:     moduleChange,
+				})
+			}
+		}
+	}
+
+	return functions, nil
+}
