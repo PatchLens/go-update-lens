@@ -1,0 +1,48 @@
+version: 2
+
+linters:
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - contextcheck
+    - decorder
+    - durationcheck
+    - errcheck
+    - errorlint
+    - exptostd
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - goconst
+    - godoclint
+    - gosmopolitan
+    - grouper
+    - iface
+    - importas
+    - mirror
+    - misspell
+    - musttag
+    - perfsprint
+    - prealloc
+    - reassign
+    - recvcheck
+    - sloglint
+    - testifylint
+    - thelper
+    - unconvert
+    - wastedassign
+    - whitespace
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters-settings:
+  goconst:
+    min-len: 4
+    min-occurrences: 4
+
+run:
+  timeout: 600s

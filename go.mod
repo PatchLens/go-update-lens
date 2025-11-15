@@ -1,8 +1,8 @@
 module github.com/PatchLens/go-update-lens
 
-go 1.24.0
+go 1.25.0
 
-toolchain go1.24.2
+toolchain go1.25.4
 
 require (
 	github.com/dgraph-io/badger/v4 v4.8.0

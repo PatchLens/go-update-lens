@@ -89,6 +89,8 @@ func main() {
 			},
 			expectedPoints: 1,
 			pointValidator: func(t *testing.T, points []LensMonitorMessagePoint) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				assert.Len(t, p.Stack, 3)
@@ -111,6 +113,8 @@ func main() {
 			inject:         singleReturnInjectorFactory((*ASTModifier).InjectFuncPointEntry),
 			expectedPoints: 1,
 			pointValidator: func(t *testing.T, points []LensMonitorMessagePoint) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				assert.Len(t, p.Stack, 4)
@@ -164,6 +168,8 @@ func main(){ TargetFinish() }`,
 			inject:              singleReturnInjectorFactory((*ASTModifier).InjectFuncPointPanic),
 			expectedPanicPoints: 1,
 			panicPointValidator: func(t *testing.T, panics []LensMonitorMessagePointPanic) {
+				t.Helper()
+
 				assert.Positive(t, panics[0].TimeNS)
 				assert.Equal(t, "expected", panics[0].Message)
 			},
@@ -177,6 +183,8 @@ func main() { TargetState() }`,
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				require.Len(t, p.Stack, 4)
@@ -207,6 +215,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				require.Len(t, p.Stack, 4)
@@ -241,6 +251,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				require.Len(t, p.Stack, 4)
@@ -274,6 +286,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				require.Len(t, p.Stack, 4)
@@ -307,6 +321,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				assert.Positive(t, p.TimeNS)
 				require.Len(t, p.Stack, 4)
@@ -339,6 +355,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 2)
 				for i := range p.Fields {
@@ -364,6 +382,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 1)
 				f := p.Fields[0]
@@ -391,6 +411,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 1)
 				f := p.Fields[0]
@@ -412,6 +434,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 1)
 				f := p.Fields[0]
@@ -435,6 +459,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 2)
 				for i := range p.Fields {
@@ -459,6 +485,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 1)
 				assert.Equal(t, "int", p.Fields[0].Type)
@@ -480,6 +508,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 1,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				p := points[0]
 				require.Len(t, p.Fields, 2)
 				for i := range p.Fields {
@@ -507,6 +537,8 @@ func main() {
 			inject:              (*ASTModifier).InjectFuncPointReturnStates,
 			expectedStatePoints: 5,
 			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
 				for i, p := range points {
 					assert.Positive(t, p.TimeNS)
 					if i > 0 {

@@ -2532,6 +2532,8 @@ func Process() {
 			expectedReceiver: "recv",
 			expectSynthetic:  true,
 			verify: func(t *testing.T, src []byte) {
+				t.Helper()
+
 				assert.Equal(t, 1, countFunctionCalls(t, src, "makeStruct"))
 				code := string(src)
 				assert.Contains(t, code, "lenSyntheticRecv0 := makeStruct()")
