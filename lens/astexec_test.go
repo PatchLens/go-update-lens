@@ -16,8 +16,9 @@ func TestCollectFields(t *testing.T) {
 
 	t.Run("simple", func(t *testing.T) {
 		fields := make(FieldValues)
-		collectFields(fields, "int", int64(7), "int64", nil)
-		collectFields(fields, "str", "s", "string", nil)
+		// Empty parent type for top-level fields
+		collectFields(fields, "int", int64(7), "int64", nil, "")
+		collectFields(fields, "str", "s", "string", nil, "")
 
 		assert.Equal(t, map[string]string{
 			"int": "7",
@@ -32,7 +33,7 @@ func TestCollectFields(t *testing.T) {
 			{Name: "nest", Type: "struct", Children: []LensMonitorField{
 				{Name: "inner", Type: "int", Value: int64(1)},
 			}},
-		})
+		}, "")
 
 		assert.Equal(t, map[string]string{
 			"parent.child":      "v",
@@ -43,13 +44,177 @@ func TestCollectFields(t *testing.T) {
 	t.Run("long_nonstring", func(t *testing.T) {
 		fields := make(FieldValues)
 		slice := make([]int, 200)
-		collectFields(fields, "big", slice, "[]int", nil)
+		collectFields(fields, "big", slice, "[]int", nil, "")
 
 		vals := fields.FlattenFieldValues()
 		val, ok := vals["big"]
 		require.True(t, ok)
 		require.True(t, strings.HasPrefix(val, HashFieldValuePrefix))
 		assert.NotEqual(t, fmt.Sprint(slice), val)
+	})
+
+	t.Run("reflection_filtering", func(t *testing.T) {
+		// Test type-based filtering - should filter out internal reflect.Value metadata
+		fields := make(FieldValues)
+		collectFields(fields, "arg0", nil, "reflect.Value", []LensMonitorField{
+			// These internal fields should be filtered out
+			{Name: "typ_", Type: "reflect.rtype", Children: []LensMonitorField{
+				{Name: "Hash", Type: "uint32", Value: uint32(123)},
+				{Name: "Str", Type: "string", Value: "someType"},
+			}},
+			{Name: "flag", Type: "reflect.flag", Value: uintptr(456)},
+			{Name: "ptr", Type: "unsafe.Pointer", Value: "0x12345"},
+			// This field should be kept (actual data)
+			{Name: "data", Type: "string", Value: "important"},
+		}, "")
+
+		// Only non-internal fields should remain
+		flattened := fields.FlattenFieldValues()
+		assert.Contains(t, flattened, "arg0.data")
+		assert.Equal(t, "important", flattened["arg0.data"])
+
+		// Internal fields should be filtered out
+		assert.NotContains(t, flattened, "arg0.typ_")
+		assert.NotContains(t, flattened, "arg0.flag")
+		assert.NotContains(t, flattened, "arg0.ptr")
+	})
+
+	t.Run("reflection_keeps_data_fields", func(t *testing.T) {
+		// Test that actual data fields are kept (not filtered)
+		fields := make(FieldValues)
+		collectFields(fields, "arg0", "targetValue", "string", nil, "")
+		collectFields(fields, "arg1", int64(42), "int", nil, "")
+
+		flattened := fields.FlattenFieldValues()
+		assert.Equal(t, map[string]string{
+			"arg0": "targetValue",
+			"arg1": "42",
+		}, flattened)
+	})
+
+	t.Run("non_reflection_no_filtering", func(t *testing.T) {
+		// Test that fields with names like "typ_", "flag", "ptr" are kept when parent is not reflect.Value
+		fields := make(FieldValues)
+		collectFields(fields, "value", nil, "CustomStruct", []LensMonitorField{
+			{Name: "typ_", Type: "string", Value: "someType"}, // Would be filtered if parent was reflect.Value
+			{Name: "flag", Type: "int", Value: int64(123)},    // Would be filtered if parent was reflect.Value
+			{Name: "ptr", Type: "string", Value: "pointer"},   // Would be filtered if parent was reflect.Value
+			{Name: "data", Type: "string", Value: "content"},
+		}, "")
+
+		// All fields should be present (no filtering for non-reflect.Value parent)
+		flattened := fields.FlattenFieldValues()
+		assert.Len(t, flattened, 4)
+		assert.Equal(t, "someType", flattened["value.typ_"])
+		assert.Equal(t, "123", flattened["value.flag"])
+		assert.Equal(t, "pointer", flattened["value.ptr"])
+		assert.Equal(t, "content", flattened["value.data"])
+	})
+
+	t.Run("nested_reflection_filtering", func(t *testing.T) {
+		// Test nested reflect.Value structures - all internal fields should be filtered
+		fields := make(FieldValues)
+		collectFields(fields, "outer", nil, "reflect.Value", []LensMonitorField{
+			{Name: "typ_", Type: "reflect.rtype", Value: "ignored"},
+			{Name: "inner", Type: "reflect.Value", Children: []LensMonitorField{
+				{Name: "typ_", Type: "reflect.rtype", Value: "also_ignored"},
+				{Name: "flag", Type: "reflect.flag", Value: uintptr(123)},
+				{Name: "actualData", Type: "string", Value: "keep_this"},
+			}},
+		}, "")
+
+		flattened := fields.FlattenFieldValues()
+		// The nested actual data should be kept
+		assert.Contains(t, flattened, "outer.inner.actualData")
+		assert.Equal(t, "keep_this", flattened["outer.inner.actualData"])
+
+		// All internal fields should be filtered
+		assert.NotContains(t, flattened, "outer.typ_")
+		assert.NotContains(t, flattened, "outer.inner.typ_")
+		assert.NotContains(t, flattened, "outer.inner.flag")
+	})
+
+	t.Run("mixed_reflection_and_custom_types", func(t *testing.T) {
+		// Test mixed scenario: reflect.Value containing a custom type with similar field names
+		fields := make(FieldValues)
+		collectFields(fields, "arg", nil, "reflect.Value", []LensMonitorField{
+			{Name: "typ_", Type: "reflect.rtype", Value: "filtered"},
+			{Name: "ptr", Type: "unsafe.Pointer", Value: "filtered"},
+			{Name: "customStruct", Type: "MyStruct", Children: []LensMonitorField{
+				// These should NOT be filtered because parent is not reflect.Value
+				{Name: "typ_", Type: "string", Value: "not_filtered"},
+				{Name: "flag", Type: "int", Value: int64(99)},
+				{Name: "data", Type: "string", Value: "important"},
+			}},
+		}, "")
+
+		flattened := fields.FlattenFieldValues()
+
+		// reflect.Value internals should be filtered
+		assert.NotContains(t, flattened, "arg.typ_")
+		assert.NotContains(t, flattened, "arg.ptr")
+
+		// Custom struct fields should NOT be filtered (parent is MyStruct, not reflect.Value)
+		assert.Contains(t, flattened, "arg.customStruct.typ_")
+		assert.Equal(t, "not_filtered", flattened["arg.customStruct.typ_"])
+		assert.Contains(t, flattened, "arg.customStruct.flag")
+		assert.Equal(t, "99", flattened["arg.customStruct.flag"])
+		assert.Contains(t, flattened, "arg.customStruct.data")
+		assert.Equal(t, "important", flattened["arg.customStruct.data"])
+	})
+
+	t.Run("reflect_rtype_and_flag_filtering", func(t *testing.T) {
+		// Test that reflect.rtype and reflect.flag types are filtered regardless of parent
+		fields := make(FieldValues)
+		collectFields(fields, "container", nil, "SomeStruct", []LensMonitorField{
+			{Name: "metadata", Type: "reflect.rtype", Children: []LensMonitorField{
+				{Name: "Size", Type: "uintptr", Value: uintptr(8)},
+			}},
+			{Name: "flags", Type: "reflect.flag", Value: uintptr(456)},
+			{Name: "normal", Type: "string", Value: "keep"},
+		}, "")
+
+		flattened := fields.FlattenFieldValues()
+
+		// reflect.rtype and reflect.flag should be filtered even in non-reflect.Value parent
+		assert.NotContains(t, flattened, "container.metadata")
+		assert.NotContains(t, flattened, "container.metadata.Size")
+		assert.NotContains(t, flattened, "container.flags")
+
+		// Normal fields should be kept
+		assert.Contains(t, flattened, "container.normal")
+		assert.Equal(t, "keep", flattened["container.normal"])
+	})
+
+	t.Run("deeply_nested_with_reflect_at_multiple_levels", func(t *testing.T) {
+		// Test deep nesting with reflect.Value at multiple levels
+		fields := make(FieldValues)
+		collectFields(fields, "level1", nil, "CustomType", []LensMonitorField{
+			{Name: "data1", Type: "string", Value: "keep1"},
+			{Name: "level2", Type: "reflect.Value", Children: []LensMonitorField{
+				{Name: "typ_", Type: "reflect.rtype", Value: "filter1"},
+				{Name: "data2", Type: "string", Value: "keep2"},
+				{Name: "level3", Type: "AnotherType", Children: []LensMonitorField{
+					{Name: "typ_", Type: "string", Value: "keep3"}, // Not filtered, parent is AnotherType
+					{Name: "level4", Type: "reflect.Value", Children: []LensMonitorField{
+						{Name: "ptr", Type: "unsafe.Pointer", Value: "filter2"},
+						{Name: "data4", Type: "string", Value: "keep4"},
+					}},
+				}},
+			}},
+		}, "")
+
+		flattened := fields.FlattenFieldValues()
+
+		// Data at all levels should be kept
+		assert.Equal(t, "keep1", flattened["level1.data1"])
+		assert.Equal(t, "keep2", flattened["level1.level2.data2"])
+		assert.Equal(t, "keep3", flattened["level1.level2.level3.typ_"]) // Not filtered
+		assert.Equal(t, "keep4", flattened["level1.level2.level3.level4.data4"])
+
+		// reflect.Value internals should be filtered at appropriate levels
+		assert.NotContains(t, flattened, "level1.level2.typ_")              // Filtered (parent is reflect.Value)
+		assert.NotContains(t, flattened, "level1.level2.level3.level4.ptr") // Filtered (parent is reflect.Value)
 	})
 }
 

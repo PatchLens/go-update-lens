@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -618,8 +617,7 @@ func (fv FieldValues) ID() string {
 	hash := sha1.New()
 	var walk func(cur FieldValues)
 	walk = func(cur FieldValues) {
-		sortedKeys := slices.Collect(maps.Keys(cur))
-		sort.Strings(sortedKeys)
+		sortedKeys := slices.Sorted(maps.Keys(cur))
 		for _, key := range sortedKeys {
 			hash.Write([]byte(key))
 			fv := cur[key]

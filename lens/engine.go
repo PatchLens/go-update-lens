@@ -63,11 +63,11 @@ type ModuleChangeProvider interface {
 	//   - neighbourRadius: radius for marking changed lines in function definitions (used for mutation testing scope)
 	//
 	// Returns:
-	//   - []*ModuleFunction: list of functions that have changed between versions
-	//   - []string: list of module names that were checked during analysis
+	//   - map[string][]*ModuleFunction: changed functions organized by module name (OLD version)
+	//   - map[string][]*packages.Package: NEW version packages with type information (keyed by module name)
 	//   - error: any error encountered during analysis
 	AnalyzeModuleChanges(config Config, analyzeExpandTransitive bool,
-		changedModules []ModuleChange, neighbourRadius int) ([]*ModuleFunction, []string, error)
+		changedModules []*ModuleChange, neighbourRadius int) (map[string][]*ModuleFunction, map[string][]*packages.Package, error)
 
 	// Cleanup is invoked after engine analysis is complete, allowing freeing of resources used during analysis.
 	Cleanup()
@@ -122,7 +122,6 @@ type UpdateAnalysisProvider interface {
 	//
 	// Parameters:
 	//   - config: configuration containing paths and settings for analysis
-	//   - portStart: starting port number for the monitoring server
 	//   - storage: storage interface for persisting test results
 	//   - changedModules: list of modules that have version changes
 	//   - reachableModuleChanges: mapping of module changes reachable from project code
@@ -135,10 +134,8 @@ type UpdateAnalysisProvider interface {
 	//   - Storage: pre-update test results storage
 	//   - Storage: post-update test results storage
 	//   - error: any error encountered during analysis
-	RunModuleUpdateAnalysis(config Config, storage Storage, changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-		callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-		preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
-		postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error)
+	RunModuleUpdateAnalysis(config Config, storage Storage, changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
+		callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error)
 
 	// Cleanup is invoked after engine analysis is complete, allowing freeing of resources used during update analysis.
 	Cleanup()
@@ -238,42 +235,19 @@ type ReportWriter interface {
 	//   - error: any error encountered during report generation or file writing
 	WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
 		analysisTime, testDiscoveryTime, testExecutionTime, mutationTime time.Duration,
-		changedModules []ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
+		changedModules []*ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
 		projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
 		sameCount, diffCount int, testReports []TestReport,
 		globalMutations MutationResult) error
 }
 
-// ModuleAnalysisData contains the complete analysis data for a single module update.
-// This structure is passed to PostModuleAnalysis hooks to provide extensions with changed function data.
-type ModuleAnalysisData struct {
-	// ModuleChange identifies the module and versions being compared
-	ModuleChange ModuleChange
-
-	// ChangedFunctions contains only functions that changed between versions, using
-	// the OLD (pre-update) version's definition with LineChangeBitmap marking modified lines
-	// relative to the old definition.
-	// Each ModuleFunction.Definition contains the old version's source code.
-	ChangedFunctions []*ModuleFunction
-}
-
 // DefaultModuleChangeProvider provides the standard implementation of ModuleChangeProvider.
-type DefaultModuleChangeProvider struct {
-	// PostModuleAnalysis is an optional hook called after analyzing all module updates.
-	//
-	// The hook is called once after all modules have been analyzed, with aggregated data from all modules.
-	//
-	// Parameters:
-	//   - allModuleData: Slice of ModuleAnalysisData, one per analyzed module
-	//
-	// Returns:
-	//   - error: Any error encountered during analysis. Errors are FATAL and will stop the entire analysis.
-	PostModuleAnalysis func(allModuleData []ModuleAnalysisData) error
-}
+type DefaultModuleChangeProvider struct{}
 
 func (d *DefaultModuleChangeProvider) AnalyzeModuleChanges(config Config, analyzeExpandTransitive bool,
-	changedModules []ModuleChange, neighbourRadius int) ([]*ModuleFunction, []string, error) {
-	return AnalyzeModuleChanges(analyzeExpandTransitive, config.Gomodcache, config.AbsProjDir, changedModules, neighbourRadius, d.PostModuleAnalysis)
+	changedModules []*ModuleChange,
+	neighbourRadius int) (map[string][]*ModuleFunction, map[string][]*packages.Package, error) {
+	return AnalyzeModuleChanges(config.Gomodcache, analyzeExpandTransitive, config.AbsProjDir, changedModules, neighbourRadius)
 }
 
 func (d *DefaultModuleChangeProvider) Cleanup() {}
@@ -306,7 +280,7 @@ type DefaultCallerAnalysisProvider struct {
 }
 
 func (d *DefaultCallerAnalysisProvider) PerformCallerStaticAnalysis(config Config, moduleChanges []*ModuleFunction) ([]*CallerFunction, ReachableModuleChange, error) {
-	callers, reachable, cg, projectPkgs, modulePkgs, err := CallerStaticAnalysis(moduleChanges, config.AbsProjDir)
+	callers, reachable, cg, projectPkgs, modulePkgs, err := CallerStaticAnalysis(moduleChanges, config.AbsProjDir, config.Gopath, config.Gomodcache)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -329,7 +303,7 @@ func (d *DefaultCallerAnalysisProvider) Cleanup() {}
 type DefaultTestProvider struct{}
 
 func (d *DefaultTestProvider) ProvideTests(config Config, callingFunctions []*CallerFunction) ([]*TestFunction, error) {
-	return TestStaticAnalysis(callingFunctions, config.AbsProjDir)
+	return TestStaticAnalysis(callingFunctions, config.AbsProjDir, config.Gopath, config.Gomodcache)
 }
 
 func (d *DefaultTestProvider) Cleanup() {}
@@ -337,34 +311,21 @@ func (d *DefaultTestProvider) Cleanup() {}
 // DefaultUpdateAnalysisProvider provides the standard implementation of UpdateAnalysisProvider.
 type DefaultUpdateAnalysisProvider struct {
 	// PreUpdateExtensionConfig is an optional function called before the first test run (old module version).
-	// It receives old version module functions and can inject monitoring points into them.
 	// Returns a map of point IDs to frame keys for storage.
-	PreUpdateExtensionConfig func(astEditor *ASTModifier, oldVersionFunctions []*ModuleFunction, callerFunctions []*CallerFunction) (map[int]*string, error)
+	PreUpdateExtensionConfig func(astEditor *ASTModifier) (map[int]*string, error)
 
 	// PostUpdateExtensionConfig is an optional function called before the second test run (new module version).
-	// It receives module version information and package paths for new versions.
 	// Returns a map of point IDs to frame keys for storage.
-	PostUpdateExtensionConfig func(astEditor *ASTModifier, changedModules []ModuleChange, newVersionPaths map[string][]string) (map[int]*string, error)
+	PostUpdateExtensionConfig func(astEditor *ASTModifier) (map[int]*string, error)
 }
 
 func (d *DefaultUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config,
-	storage Storage, changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error) {
-	// Use provided extension configs if available, otherwise fall back to struct fields
-	preConfig := preUpdateExtensionConfig
-	if preConfig == nil {
-		preConfig = d.PreUpdateExtensionConfig
-	}
-	postConfig := postUpdateExtensionConfig
-	if postConfig == nil {
-		postConfig = d.PostUpdateExtensionConfig
-	}
-
+	storage Storage, changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
 	return RunModuleUpdateAnalysis(config.Gopath, config.Gomodcache, config.AbsProjDir, config.AstMonitorPort,
 		storage, config.MaxFieldRecurse, config.MaxFieldLen,
-		changedModules, reachableModuleChanges, callingFunctions, testFunctions, preConfig, postConfig)
+		changedModules, reachableModuleChanges, callingFunctions, testFunctions,
+		d.PreUpdateExtensionConfig, d.PostUpdateExtensionConfig)
 }
 
 func (d *DefaultUpdateAnalysisProvider) Cleanup() {}
@@ -459,8 +420,8 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 		callerFieldChanges := make(map[string]map[string]string)
 		callerTimeChanges := make(map[string]PerformanceTimeChange)
 		var testSameCount, testDiffCount, testRegressionCount int
-		sortedIdents := slices.Collect(maps.Keys(preResults.CallerResults))
-		slices.Sort(sortedIdents) // iterate sorted idents in case we want to compare across runs
+		// iterate sorted idents in case we want to compare across runs
+		sortedIdents := slices.Sorted(maps.Keys(preResults.CallerResults))
 
 		var bb bytes.Buffer
 		for _, callerIdent := range sortedIdents {
@@ -502,9 +463,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 				preFlat := frame.FieldValues.FlattenFieldValues()
 				postFlat := postFrame.FieldValues.FlattenFieldValues()
 
-				sortedNames := slices.Collect(maps.Keys(preFlat))
-				slices.Sort(sortedNames)
-				for _, fname := range sortedNames {
+				for _, fname := range slices.Sorted(maps.Keys(preFlat)) {
 					value := preFlat[fname]
 					vPost, ok := postFlat[fname]
 					if !ok {
@@ -700,7 +659,7 @@ type DefaultReportWriter struct{}
 
 func (d *DefaultReportWriter) WriteReportFiles(jsonPath, chartPath string, startTime time.Time,
 	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
-	changedModules []ModuleChange, checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
+	changedModules []*ModuleChange, checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
 	projectFieldChecks int, projectCallingFunctions []*CallerFunction, relevantTestFunctions []*TestFunction,
 	testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
 	globalMutations MutationResult) error {
@@ -818,25 +777,36 @@ func (e *AnalysisEngine) Run() error {
 	}
 
 	// Analyze the changes for the updated module
-	moduleChanges, checkedModuleNames, err :=
-		e.ModuleChangeProvider.AnalyzeModuleChanges(*e.Config, initialModules.analyzeExpandTransitive,
-			initialModules.changedModules, initialModules.neighbourRadius)
-	if err != nil {
-		errStr := err.Error()
-		for _, cm := range initialModules.changedModules {
-			if !strings.Contains(errStr, cm.Name) {
-				continue
+	var moduleChanges []*ModuleFunction
+	var checkedModuleNames []string
+	{ // Block scope for early GC of analysis maps after flattening
+		moduleToFuncs, _, err :=
+			e.ModuleChangeProvider.AnalyzeModuleChanges(*e.Config, initialModules.analyzeExpandTransitive,
+				initialModules.changedModules, initialModules.neighbourRadius)
+		if err != nil {
+			errStr := err.Error()
+			for _, cm := range initialModules.changedModules {
+				if !strings.Contains(errStr, cm.Name) {
+					continue
+				}
+				if strings.Contains(errStr, cm.PriorVersion) {
+					return fmt.Errorf("module %s@%s not found on disk, run: go install %s@%s",
+						cm.Name, cm.PriorVersion, cm.Name, cm.PriorVersion)
+				} else if strings.Contains(errStr, cm.NewVersion) {
+					return fmt.Errorf("module %s@%s not found on disk, run: go install %s@%s",
+						cm.Name, cm.NewVersion, cm.Name, cm.NewVersion)
+				}
 			}
-			if strings.Contains(errStr, cm.PriorVersion) {
-				return fmt.Errorf("module %s@%s not found on disk, run: go install %s@%s",
-					cm.Name, cm.PriorVersion, cm.Name, cm.PriorVersion)
-			} else if strings.Contains(errStr, cm.NewVersion) {
-				return fmt.Errorf("module %s@%s not found on disk, run: go install %s@%s",
-					cm.Name, cm.NewVersion, cm.Name, cm.NewVersion)
-			}
+			return fmt.Errorf("error analyzing changes %w", err)
 		}
-		return fmt.Errorf("error analyzing changes %w", err)
+
+		checkedModuleNames = slices.Sorted(maps.Keys(moduleToFuncs))
+
+		for _, modName := range checkedModuleNames { // iterate over sorted checkedModuleNames for determinism
+			moduleChanges = append(moduleChanges, moduleToFuncs[modName]...)
+		}
 	}
+
 	defer e.ModuleChangeProvider.Cleanup()
 	if len(moduleChanges) == 0 {
 		log.Printf("Module has no changed functions, exiting")
@@ -908,7 +878,7 @@ func (e *AnalysisEngine) Run() error {
 	defer storage.Close()
 	projectFieldChecks, moduleChangesReachedInTesting, preResults, postResults, err :=
 		e.UpdateAnalysisProvider.RunModuleUpdateAnalysis(*e.Config, storage,
-			initialModules.changedModules, reachableModuleChanges, callingFunctions, testFunctions, nil, nil)
+			initialModules.changedModules, reachableModuleChanges, callingFunctions, testFunctions)
 	if err != nil {
 		return fmt.Errorf("error during monitored test execution: %w", err)
 	}
@@ -942,7 +912,6 @@ func (e *AnalysisEngine) Run() error {
 	log.Printf("Module changes checked: %d, reached: %d",
 		len(reachableModuleChanges), moduleChangesReachedInTesting)
 
-	// Use ReportWriter
 	err = e.ReportWriter.WriteReportFiles(e.Config.ReportJsonFile, e.Config.ReportChartsFile, startTime,
 		analysisEndTime.Sub(startTime),
 		testDiscoveryEndTime.Sub(analysisEndTime),
@@ -960,7 +929,7 @@ func (e *AnalysisEngine) Run() error {
 }
 
 type initialModulesResult struct {
-	changedModules          []ModuleChange
+	changedModules          []*ModuleChange
 	analyzeExpandTransitive bool
 	neighbourRadius         int
 }
@@ -973,10 +942,10 @@ func (e *AnalysisEngine) parseInitialModules() (*initialModulesResult, error) {
 	}
 
 	var analyzeExpandTransitive bool
-	var changedModules []ModuleChange
+	var changedModules []*ModuleChange
 	if len(e.Config.TargetModules) > 0 {
 		analyzeExpandTransitive = true // expand to include transitive modules to the specified modules
-		changedModules = make([]ModuleChange, 0, len(e.Config.TargetModules))
+		changedModules = make([]*ModuleChange, 0, len(e.Config.TargetModules))
 		for _, targetModule := range e.Config.TargetModules {
 			// Parse go.mod to find the current version
 			oldVer, indirect, err := FindModuleVersion(e.Config.AbsProjDir, targetModule.Name)
@@ -986,7 +955,7 @@ func (e *AnalysisEngine) parseInitialModules() (*initialModulesResult, error) {
 				log.Printf("WARN: Module %s not found in workspace", targetModule.Name)
 				continue
 			}
-			changedModules = append(changedModules, ModuleChange{
+			changedModules = append(changedModules, &ModuleChange{
 				Name:         targetModule.Name,
 				PriorVersion: oldVer,
 				NewVersion:   targetModule.Version,

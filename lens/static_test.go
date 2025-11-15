@@ -501,7 +501,7 @@ func TestLoadProjectPackageCallGraph(t *testing.T) {
 		work := "go 1.20\nuse (\n    ./ffmap\n    ./charts\n    ./combo\n)\n"
 		require.NoError(t, os.WriteFile(filepath.Join(root, "go.work"), []byte(work), 0o644))
 
-		cg, err := loadProjectPackageCallGraph(root, false)
+		cg, err := loadProjectPackageCallGraph(root, "", "", false)
 		require.NoError(t, err)
 		require.NotNil(t, cg)
 	})
@@ -590,7 +590,7 @@ func TestCallerStaticAnalysis(t *testing.T) {
 		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:sliceUniqueUnion"}},
 	}
 
-	callers, reachable, _, _, _, err := CallerStaticAnalysis(changes, root)
+	callers, reachable, _, _, _, err := CallerStaticAnalysis(changes, root, "", "")
 	require.NoError(t, err)
 	assert.Len(t, callers, 8)
 
@@ -631,10 +631,10 @@ func TestTestStaticAnalysis(t *testing.T) {
 		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:sliceUniqueUnion"}},
 	}
 
-	callers, _, _, _, _, err := CallerStaticAnalysis(changes, root)
+	callers, _, _, _, _, err := CallerStaticAnalysis(changes, root, "", "")
 	require.NoError(t, err)
 
-	tests, err := TestStaticAnalysis(callers, root)
+	tests, err := TestStaticAnalysis(callers, root, "", "")
 	require.NoError(t, err)
 	assert.Len(t, tests, 4)
 
@@ -666,7 +666,7 @@ func TestExtractCallGraphEdges(t *testing.T) {
 		{Function: Function{FunctionIdent: "github.com/go-analyze/flat-file-map/ffmap:OpenCSV"}},
 	}
 
-	_, _, cg, _, _, err := CallerStaticAnalysis(changes, root)
+	_, _, cg, _, _, err := CallerStaticAnalysis(changes, root, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, cg, "call graph should not be nil")
 

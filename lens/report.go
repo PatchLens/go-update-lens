@@ -105,7 +105,7 @@ type TestReport struct {
 type ReportMap map[string]interface{}
 
 // PrepareReportData prepares all the data needed for report generation.
-func PrepareReportData(changedModules []ModuleChange, projectCallingFunctions []*CallerFunction,
+func PrepareReportData(changedModules []*ModuleChange, projectCallingFunctions []*CallerFunction,
 	relevantTestFunctions []*TestFunction, testResults []TestReport,
 	moduleChangeFuncCount int) (reachableModuleFunctionsIdents []string,
 	relevantProjectFunctionIdents []string, relevantTestFunctionsIdents []string,
@@ -173,15 +173,15 @@ func PrepareReportData(changedModules []ModuleChange, projectCallingFunctions []
 	return
 }
 
-func rootModule(changedModules []ModuleChange) ModuleChange {
+func rootModule(changedModules []*ModuleChange) ModuleChange {
 	if len(changedModules) == 1 {
-		return changedModules[0]
+		return *changedModules[0]
 	}
 	var directModule ModuleChange
 	for _, m := range changedModules {
 		if !m.Indirect {
 			if directModule.Name == "" {
-				directModule = m
+				directModule = *m
 			} else {
 				return ModuleChange{} // return empty module to indicate no root module
 			}

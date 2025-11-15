@@ -1,7 +1,6 @@
 package lens
 
 import (
-	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -63,11 +62,11 @@ func TestAggregateFunctions(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, pkgs, 1)
 
-			funcMap, err := aggregateFunctions(pkgs[0])
+			mc := &ModuleChange{Name: tc.pkgPath, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}
+			funcMap, err := aggregateFunctions(mc, pkgs[0])
 			require.NoError(t, err)
 
-			keys := slices.Collect(maps.Keys(funcMap))
-			sort.Strings(keys)
+			keys := slices.Sorted(maps.Keys(funcMap))
 
 			sort.Strings(tc.expectedFuncs)
 			assert.Equal(t, tc.expectedFuncs, keys)
@@ -265,7 +264,7 @@ require (
 	require.NoError(t, err)
 
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Name < changes[j].Name })
-	expected := []ModuleChange{
+	expected := []*ModuleChange{
 		{Name: "example.com/foo", PriorVersion: "v1.0.0", NewVersion: "v1.1.0", Indirect: false},
 		{Name: "example.com/qux", PriorVersion: "v0.1.0", NewVersion: "v0.2.0", Indirect: true},
 	}
@@ -582,11 +581,15 @@ func TestAnalyzeModuleChanges(t *testing.T) {
 		addVersion("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
 		addVersion("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
 
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, nil)
+		mods := []*ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		moduleToFuncs, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 		require.NoError(t, err)
+
+		checked := slices.Sorted(maps.Keys(moduleToFuncs))
 		require.Len(t, checked, 1)
 		assert.Equal(t, testModName, checked[0])
+
+		funcs := moduleToFuncs[testModName]
 		require.Len(t, funcs, 1)
 		assert.Equal(t, "Foo", funcs[0].FunctionName)
 		assert.Contains(t, funcs[0].Definition, "return 1")
@@ -610,50 +613,25 @@ func Bar() int { return 10 }
 func Baz() int { return 30 }
 `)
 
-		var hookCalled bool
-		var hookData []ModuleAnalysisData
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
-			hookCalled = true
-			hookData = data
-			return nil
-		})
+		mods := []*ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		data, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 
 		require.NoError(t, err)
-		require.True(t, hookCalled, "hook should be called")
-		require.Len(t, hookData, 1)
+		require.Len(t, data, 1)
 
-		// Check ModuleAnalysisData structure
-		assert.Equal(t, testModName, hookData[0].ModuleChange.Name)
-		assert.Equal(t, "v1.0.0", hookData[0].ModuleChange.PriorVersion)
-		assert.Equal(t, "v1.1.0", hookData[0].ModuleChange.NewVersion)
+		// Check that the expected module change is present
+		mc := *mods[0]
+		changedFuncs, exists := data[mc.Name]
+		require.True(t, exists)
 
 		// ChangedFunctions should only contain Foo (changed)
-		require.Len(t, hookData[0].ChangedFunctions, 1)
-		assert.Equal(t, "Foo", hookData[0].ChangedFunctions[0].FunctionName)
+		require.Len(t, changedFuncs, 1)
+		assert.Equal(t, "Foo", changedFuncs[0].FunctionName)
 
-		// Main return value should also only have changed functions
-		require.Len(t, funcs, 1)
-		assert.Equal(t, "Foo", funcs[0].FunctionName)
+		// Verify checked modules
+		checked := slices.Collect(maps.Keys(data))
 		require.Len(t, checked, 1)
 		assert.Equal(t, testModName, checked[0])
-	})
-
-	t.Run("hook_error_propagates", func(t *testing.T) {
-		gomodcache, addVersion := setupTestModuleEnv(t)
-		projectDir := t.TempDir()
-
-		addVersion("v1.0.0", "package testmod\n\nfunc Test() int { return 1 }\n")
-		addVersion("v1.1.0", "package testmod\n\nfunc Test() int { return 2 }\n")
-
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
-			return errors.New("test hook error")
-		})
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "post-module analysis hook failed")
-		assert.Contains(t, err.Error(), "test hook error")
 	})
 
 	t.Run("multiple_modules_hook_data", func(t *testing.T) {
@@ -675,31 +653,33 @@ func Baz() int { return 30 }
 		createModule("example.com/beta", "v2.0.0", "package beta\n\nfunc B1() int { return 10 }\n")
 		createModule("example.com/beta", "v2.1.0", "package beta\n\nfunc B1() int { return 20 }\n")
 
-		var hookData []ModuleAnalysisData
-		mods := []ModuleChange{
+		mods := []*ModuleChange{
 			{Name: "example.com/alpha", PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
 			{Name: "example.com/beta", PriorVersion: "v2.0.0", NewVersion: "v2.1.0"},
 		}
 
-		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
-			hookData = data
-			return nil
-		})
+		data, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 
 		require.NoError(t, err)
-		require.Len(t, hookData, 2)
+		require.Len(t, data, 2)
 
 		// Check module alpha data
-		assert.Equal(t, "example.com/alpha", hookData[0].ModuleChange.Name)
-		require.Len(t, hookData[0].ChangedFunctions, 1) // only A1 changed
+		alphaChangedFuncs, exists := data[mods[0].Name]
+		require.True(t, exists)
+		require.Len(t, alphaChangedFuncs, 1) // only A1 changed
 
 		// Check module beta data
-		assert.Equal(t, "example.com/beta", hookData[1].ModuleChange.Name)
-		require.Len(t, hookData[1].ChangedFunctions, 1) // B1 changed
+		betaChangedFuncs, exists := data[mods[1].Name]
+		require.True(t, exists)
+		require.Len(t, betaChangedFuncs, 1) // B1 changed
 
-		// Main return should have 2 changed functions total
-		require.Len(t, funcs, 2)
-		require.Len(t, checked, 2)
+		// Verify total function count
+		var totalFuncs int
+		for _, funcs := range data {
+			assert.NotEmpty(t, funcs)
+			totalFuncs += len(funcs)
+		}
+		assert.Equal(t, 2, totalFuncs)
 	})
 
 	t.Run("no_changes", func(t *testing.T) {
@@ -711,22 +691,17 @@ func Baz() int { return 30 }
 		addVersion("v1.0.0", sameCode)
 		addVersion("v1.1.0", sameCode)
 
-		var hookData []ModuleAnalysisData
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, func(data []ModuleAnalysisData) error {
-			hookData = data
-			return nil
-		})
+		mods := []*ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		data, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 
 		require.NoError(t, err)
-		require.Len(t, hookData, 1)
+		require.Len(t, data, 1)
 
 		// ChangedFunctions should be empty (no changes)
-		assert.Empty(t, hookData[0].ChangedFunctions)
-
-		// Main return should have no changed functions
-		assert.Empty(t, funcs)
-		require.Len(t, checked, 1)
+		mc := *mods[0]
+		changedFuncs, exists := data[mc.Name]
+		require.True(t, exists)
+		assert.Empty(t, changedFuncs)
 	})
 }
 
@@ -790,7 +765,7 @@ require example.com/foo v1.1.0`
 	changes, err := DiffModulesFromGoWorkFiles(oldDir, filepath.Join(newDir, "go.work"))
 	require.NoError(t, err)
 	require.Len(t, changes, 1)
-	assert.Equal(t, ModuleChange{Name: "example.com/foo", PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}, changes[0])
+	assert.Equal(t, ModuleChange{Name: "example.com/foo", PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}, *changes[0])
 }
 
 func TestProjectPackagePatterns(t *testing.T) {

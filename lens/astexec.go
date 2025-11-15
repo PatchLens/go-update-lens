@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/go-analyze/bulk"
-	"golang.org/x/mod/module"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/mtraver/base91"
@@ -34,27 +33,20 @@ const (
 	testFailStr            = "FAIL"
 )
 
-// postUpdateExtensionContext holds context for post-update extension configuration.
-type postUpdateExtensionContext struct {
-	config          func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)
-	changedModules  []ModuleChange
-	newVersionPaths map[string][]string
-}
-
 // RunModuleUpdateAnalysis modifies the project and modules AST to include hooks for calls into the AST client.
 // Our astServer accepts these calls, and invokes back into our code here so that we can analyze the project execution.
 //
 // Extension point configurations allow custom monitoring to be injected into module code:
-//   - preUpdateExtensionConfig: Called before first test run with old version module functions
-//   - postUpdateExtensionConfig: Called before second test run with new version package paths
+//   - preUpdateExtensionConfig: Called before first test run (old version)
+//   - postUpdateExtensionConfig: Called before second test run (new version)
 //
 // Both hooks are optional (can be nil). The returned point IDs from both are merged for monitoring.
 func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart int,
 	storage Storage, maxVariableRecurse, maxFieldLen int, // values impact memory usage
-	changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
+	changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
 	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error) {
+	preUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error)) (int, int, Storage, Storage, error) {
 	env := GoEnv(gopath, gomodcache)
 
 	if err := goCacheClean(env); err != nil { // will be cleaned at the end of each analysis also
@@ -142,24 +134,11 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	// capture stable fields after module update
 	postStorage := KeyPrefixStorage(storage, "post")
 
-	// Compute new version package paths for post-update extension config
-	var newVersionPaths map[string][]string
-	if postUpdateExtensionConfig != nil {
-		newVersionPaths, err = computeNewVersionPackagePaths(changedModules, gomodcache)
-		if err != nil {
-			return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
-		}
-	}
-
 	projectFieldChecks2, _, err :=
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			preStorage, postStorage,
 			nil, // module change function definitions are not valid for the updated version
-			callingFunctions, testFunctions, nil, &postUpdateExtensionContext{
-				config:          postUpdateExtensionConfig,
-				changedModules:  changedModules,
-				newVersionPaths: newVersionPaths,
-			})
+			callingFunctions, testFunctions, nil, postUpdateExtensionConfig)
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
 	}
@@ -180,63 +159,11 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	return max(projectFieldChecks1, projectFieldChecks2), moduleChangesReached, preStorage, postStorage, nil
 }
 
-// computeNewVersionPackagePaths calculates the package paths for modules at their new versions.
-// This enables post-update extension points to locate and inject into new version packages.
-func computeNewVersionPackagePaths(changes []ModuleChange, gomodcache string) (map[string][]string, error) {
-	result := make(map[string][]string)
-
-	for _, change := range changes {
-		// Compute expected path for new version in GOMODCACHE using proper encoding
-		// Go's module cache uses case-sensitive encoding with "!" for uppercase letters
-		// e.g., github.com/Azure/lib@v2.0.0 -> /go/pkg/mod/github.com/!azure/lib@v2.0.0
-		escapedPath, err := module.EscapePath(change.Name)
-		if err != nil {
-			return nil, fmt.Errorf("failed to escape module path %s: %w", change.Name, err)
-		}
-		modPath := escapedPath + "@" + change.NewVersion
-		fullPath := filepath.Join(gomodcache, filepath.FromSlash(modPath))
-
-		// Find all Go packages within this module
-		var pkgPaths []string
-		_ = filepath.Walk(fullPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil // Skip inaccessible paths
-			}
-			if info.IsDir() && containsGoFiles(path) {
-				pkgPaths = append(pkgPaths, path)
-			}
-			return nil
-		})
-
-		if len(pkgPaths) > 0 {
-			result[change.Name] = pkgPaths
-			log.Printf("Found %d packages for %s@%s", len(pkgPaths), change.Name, change.NewVersion)
-		}
-	}
-
-	return result, nil
-}
-
-// containsGoFiles checks if a directory contains any non-test Go files.
-func containsGoFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") &&
-			!strings.HasSuffix(entry.Name(), "_test.go") {
-			return true
-		}
-	}
-	return false
-}
-
 func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	srvChan chan *astServer, goroot, projectDir string, stableResultsStorage Storage, storage Storage,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction,
-	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
-	postUpdateExtensionCtx *postUpdateExtensionContext) (int, int, error) {
+	preUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error)) (int, int, error) {
 	astEditor := &ASTModifier{}
 	defer func() {
 		errs := astEditor.Restore(env)
@@ -246,13 +173,13 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	}()
 
 	projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent, err :=
-		injectMonitorPoints(astEditor, maxVariableRecurse, maxFieldLen, moduleChanges, callerFunctions, preUpdateExtensionConfig, postUpdateExtensionCtx)
+		injectMonitorPoints(astEditor, maxVariableRecurse, maxFieldLen, moduleChanges, callerFunctions, preUpdateExtensionConfig, postUpdateExtensionConfig)
 	if err != nil {
 		return 0, 0, err
 	}
 
 	// Clear build cache after extension point injection to ensure Go picks up any newly injected files in GOMODCACHE
-	if postUpdateExtensionCtx != nil && postUpdateExtensionCtx.config != nil {
+	if postUpdateExtensionConfig != nil {
 		if err := goCacheClean(env); err != nil {
 			return 0, 0, fmt.Errorf("failed to cleanup post update extension cache: %w", err)
 		}
@@ -292,8 +219,10 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 			}
 			buf := &bytes.Buffer{}
 			envWithPort := append([]string{fmt.Sprintf("LENS_MONITOR_PORT=%d", srv.Port())}, env...)
+			// Force second run for extension frames in post-update to filter unstable fields
+			forceSecondRun := postUpdateExtensionConfig != nil
 			failureOutput, testResult, fieldCheckCount, testModuleChangesReached, err :=
-				runMonitoredTest(envWithPort, goroot, projectDir, srv, buf, stableResults,
+				runMonitoredTest(envWithPort, goroot, projectDir, srv, buf, stableResults, forceSecondRun,
 					projectStatePointIdToIdent, projectPanicPointIdToIdent,
 					moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent,
 					tFunc)
@@ -349,8 +278,8 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 
 func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen int,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction,
-	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
-	postUpdateExtensionCtx *postUpdateExtensionContext) (
+	preUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error)) (
 	map[int]*string, map[int]*string, map[int]*string, map[int]*string, map[int]*string, error) {
 	pointIdLock := sync.Mutex{}
 	projectStatePointIdToIdent := make(map[int]*string)
@@ -523,7 +452,7 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 	// Handle pre-update extension config (old version)
 	if preUpdateExtensionConfig != nil {
 		var err error
-		extensionStatePointIdToIdent, err = preUpdateExtensionConfig(astEditor, moduleChanges, callerFunctions)
+		extensionStatePointIdToIdent, err = preUpdateExtensionConfig(astEditor)
 		if err != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("pre-update extension point configuration failed: %w", err)
 		}
@@ -533,8 +462,8 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 	}
 
 	// Handle post-update extension config (new version)
-	if postUpdateExtensionCtx != nil && postUpdateExtensionCtx.config != nil {
-		postExtensionPoints, err := postUpdateExtensionCtx.config(astEditor, postUpdateExtensionCtx.changedModules, postUpdateExtensionCtx.newVersionPaths)
+	if postUpdateExtensionConfig != nil {
+		postExtensionPoints, err := postUpdateExtensionConfig(astEditor)
 		if err != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("post-update extension point configuration failed: %w", err)
 		}
@@ -555,7 +484,7 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 }
 
 func runMonitoredTest(env []string, goroot, projectDir string, srv *astServer, execOutput *bytes.Buffer,
-	stableResults *monitorStableResults,
+	stableResults *monitorStableResults, forceSecondRun bool,
 	projectStatePointIdToIdent, projectPanicPointIdToIdent,
 	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string, tFunc *TestFunction) (string, TestResult, int, []*string, error) {
 	pointHandler1 := newTestMonitor(stableResults, goroot, projectDir,
@@ -575,7 +504,7 @@ func runMonitoredTest(env []string, goroot, projectDir string, srv *astServer, e
 	test1ModuleChangesReached := pointHandler1.getModuleChangesReached()
 	pointHandler1 = nil //nolint:wastedassign // allow garbage collection
 
-	if stableResults != nil {
+	if stableResults != nil && !forceSecondRun {
 		// we already know the field selection, skip second test run
 		return failureOutput, test1Result, test1FieldCheckCount, test1ModuleChangesReached, nil
 	}
@@ -784,10 +713,11 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 			}
 		}
 
-		// flatten fields
+		// flatten fields with type-aware filtering applied
 		fieldMap := make(FieldValues)
 		for _, sf := range msg.Fields {
-			collectFields(fieldMap, sf.Name, sf.Value, sf.Type, sf.Children)
+			// Empty parent type for top-level fields
+			collectFields(fieldMap, sf.Name, sf.Value, sf.Type, sf.Children, "")
 		}
 
 		// Filter by stable results if present (memory optimization: only record fields that vary between runs)
@@ -869,10 +799,34 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 	}()
 }
 
-// collectFields flattens nested fields into dot‑separated names.
-func collectFields(dst FieldValues, name string, val interface{}, typ string, children []LensMonitorField) {
+// shouldCaptureField determines if a field should be captured based on type information.
+// This filters out noisy internal metadata (e.g., reflect.Value internal fields) that are
+// implementation details rather than meaningful state.
+func shouldCaptureField(fieldName string, fieldType string, parentType string) bool {
+	if parentType == "reflect.Value" {
+		switch fieldName {
+		case "typ_", "flag", "ptr":
+			return false
+		}
+	}
+
+	// For fields with reflect internal types, filter them out
+	// These are typically nested inside reflect.Value
+	if fieldType == "reflect.rtype" || fieldType == "reflect.flag" {
+		return false
+	}
+
+	return true
+}
+
+// collectFields flattens nested fields into dot-separated names with type-aware filtering applied.
+func collectFields(dst FieldValues, key string, val interface{}, typ string, children []LensMonitorField, parentType string) {
+	if !shouldCaptureField(key, typ, parentType) {
+		return
+	}
+
 	value := &FieldValue{}
-	dst[name] = value
+	dst[key] = value
 	if len(children) == 0 {
 		str := fmt.Sprint(val)
 		if !strings.HasSuffix(typ, "string") && len(str) > nonStringHashSizeLimit {
@@ -884,7 +838,7 @@ func collectFields(dst FieldValues, name string, val interface{}, typ string, ch
 	}
 	vChildren := make(FieldValues)
 	for _, ch := range children {
-		collectFields(vChildren, ch.Name, ch.Value, ch.Type, ch.Children)
+		collectFields(vChildren, ch.Name, ch.Value, ch.Type, ch.Children, typ)
 	}
 	value.Children = vChildren
 }

@@ -233,8 +233,7 @@ func buildExecSelectTestsScript(fileToTests map[string][]string, packages []stri
 	}
 
 	// Sort keys for reproducible output (in case of inter-test interactions)
-	keys := slices.Collect(maps.Keys(fileToTests))
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(fileToTests))
 
 	// Populate the associative array
 	for _, fp := range keys {

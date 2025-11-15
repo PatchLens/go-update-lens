@@ -2,6 +2,7 @@ package lens
 
 import (
 	"bytes"
+	"cmp"
 	"embed"
 	"errors"
 	"fmt"
@@ -20,7 +21,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1055,9 +1055,9 @@ func visibleDeclsBefore(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
 		return true
 	})
 
-	result := slices.Collect(maps.Values(latest))
-	sort.Slice(result, func(i, j int) bool { return result[i].pos < result[j].pos })
-	return result
+	return slices.SortedFunc(maps.Values(latest), func(a, b declInfo) int {
+		return cmp.Compare(a.pos, b.pos)
+	})
 }
 
 // buildReturnInstrumentation inserts instrumentation around an explicit return. All nodes that originate

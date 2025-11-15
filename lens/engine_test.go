@@ -2,8 +2,10 @@ package lens
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,13 +17,20 @@ import (
 
 type mockModuleChangeProvider struct {
 	moduleChanges []*ModuleFunction
-	checkedNames  []string
 	err           error
 }
 
 func (m *mockModuleChangeProvider) AnalyzeModuleChanges(config Config, analyzeExpandTransitive bool,
-	changedModules []ModuleChange, neighbourRadius int) ([]*ModuleFunction, []string, error) {
-	return m.moduleChanges, m.checkedNames, m.err
+	changedModules []*ModuleChange, neighbourRadius int) (map[string][]*ModuleFunction, map[string][]*packages.Package, error) {
+	moduleToFuncs := make(map[string][]*ModuleFunction)
+	for _, fn := range m.moduleChanges {
+		modName := "test-module"
+		if fn.Module != nil {
+			modName = fn.Module.Name
+		}
+		moduleToFuncs[modName] = append(moduleToFuncs[modName], fn)
+	}
+	return moduleToFuncs, nil, m.err
 }
 
 func (m *mockModuleChangeProvider) Cleanup() {}
@@ -57,10 +66,8 @@ type mockUpdateAnalysisProvider struct {
 }
 
 func (m *mockUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config, storage Storage,
-	changedModules []ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	preUpdateExtensionConfig func(*ASTModifier, []*ModuleFunction, []*CallerFunction) (map[int]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier, []ModuleChange, map[string][]string) (map[int]*string, error)) (int, int, Storage, Storage, error) {
+	changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
 	return m.projectFieldChecks, m.moduleChangesReachedInTesting, m.preResults, m.postResults, m.err
 }
 
@@ -84,7 +91,7 @@ type mockReportWriter struct {
 
 func (m *mockReportWriter) WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
 	analysisTime, testDiscoveryTime, testExecutionTime, mutationTime time.Duration,
-	changedModules []ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
+	changedModules []*ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
 	projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
 	sameCount, diffCount int, testReports []TestReport,
 	globalMutations MutationResult) error {
@@ -162,7 +169,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: mockModuleChanges,
-				checkedNames:  []string{"github.com/test/module"},
 			},
 			&mockCallerAnalysisProvider{
 				callingFunctions: mockCallingFunctions,
@@ -202,7 +208,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: []*ModuleFunction{}, // No changes
-				checkedNames:  []string{},
 			},
 			nil, nil, nil, nil, nil, nil,
 			&mockReportWriter{},
@@ -222,7 +227,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: []*ModuleFunction{}, // No changes
-				checkedNames:  []string{"github.com/test/module"},
 			},
 			nil, nil, nil, nil, nil, nil,
 			&mockReportWriter{},
@@ -246,7 +250,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: mockModuleChanges,
-				checkedNames:  []string{"github.com/test/module"},
 			},
 			&mockCallerAnalysisProvider{
 				callingFunctions: []*CallerFunction{}, // No callers
@@ -276,7 +279,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: mockModuleChanges,
-				checkedNames:  []string{"github.com/test/module"},
 			},
 			&mockCallerAnalysisProvider{
 				callingFunctions: mockCallingFunctions,
@@ -320,7 +322,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: []*ModuleFunction{{Function: Function{FunctionName: "TestFunc"}}},
-				checkedNames:  []string{"test"},
 			},
 			&mockCallerAnalysisProvider{
 				err: errors.New("caller analysis failed"),
@@ -342,7 +343,6 @@ func TestAnalysisEngine_Run(t *testing.T) {
 			config,
 			&mockModuleChangeProvider{
 				moduleChanges: []*ModuleFunction{{Function: Function{FunctionName: "TestFunc"}}},
-				checkedNames:  []string{"test"},
 			},
 			&mockCallerAnalysisProvider{
 				callingFunctions: []*CallerFunction{{Function: Function{FunctionName: "CallerFunc"}}},
@@ -1565,12 +1565,11 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		addVersion("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
 		addVersion("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
 
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		funcs, checked, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0, nil)
+		mods := []*ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		moduleToFuncs, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 
 		require.NoError(t, err)
-		assert.NotEmpty(t, funcs)
-		assert.NotEmpty(t, checked)
+		assert.NotEmpty(t, moduleToFuncs)
 	})
 
 	t.Run("single_module", func(t *testing.T) {
@@ -1584,21 +1583,17 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		// New version changes Foo but not Bar
 		addVersion("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\nfunc Bar() int { return 3 }\n")
 
-		var receivedData []ModuleAnalysisData
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0,
-			func(allModuleData []ModuleAnalysisData) error {
-				receivedData = allModuleData
-				return nil
-			})
+		mods := []*ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+		receivedData, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 
 		require.NoError(t, err)
 		require.Len(t, receivedData, 1)
 
-		data := receivedData[0]
+		data := slices.Collect(maps.Keys(receivedData))
+		require.Len(t, data, 1)
 		// ChangedFunctions should only have Foo (Bar is unchanged)
-		assert.Len(t, data.ChangedFunctions, 1)
-		assert.Equal(t, "Foo", data.ChangedFunctions[0].FunctionName)
+		require.Len(t, receivedData[data[0]], 1)
+		assert.Equal(t, "Foo", receivedData[data[0]][0].FunctionName)
 	})
 
 	t.Run("multiple_modules", func(t *testing.T) {
@@ -1625,53 +1620,22 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		createModule(modName2, "v1.1.0", "package mod2\n\nfunc F2() int { return 4 }\n")
 		createModule(modName3, "v1.0.0", "package mod3\n\nfunc F3() int { return 5 }\n")
 		createModule(modName3, "v1.1.0", "package mod3\n\nfunc F3() int { return 6 }\n")
-		var hookCallCount int
-		var receivedData []ModuleAnalysisData
-		mods := []ModuleChange{
+		mods := []*ModuleChange{
 			{Name: modName1, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
 			{Name: modName2, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
 			{Name: modName3, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"},
 		}
-		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0,
-			func(allModuleData []ModuleAnalysisData) error {
-				hookCallCount++
-				receivedData = allModuleData
-				return nil
-			})
+
+		receivedData, _, err := AnalyzeModuleChanges(gomodcache, false, projectDir, mods, 0)
 
 		require.NoError(t, err)
 
-		// Verify hook is called exactly once with all modules
-		assert.Equal(t, 1, hookCallCount)
+		// Verify all modules are present
 		assert.Len(t, receivedData, 3)
-
-		// Verify each module's data structure
-		for _, data := range receivedData {
-			assert.NotEmpty(t, data.ModuleChange.Name)
-			assert.NotEmpty(t, data.ChangedFunctions)
+		for moduleName, funcs := range receivedData {
+			assert.NotEmpty(t, moduleName)
+			assert.NotEmpty(t, funcs)
 		}
-	})
-
-	t.Run("hook_error", func(t *testing.T) {
-		t.Parallel()
-
-		gomodcache, addVersion := setupTestModuleEnv(t)
-		projectDir := t.TempDir()
-
-		addVersion("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
-		addVersion("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
-
-		expectedErr := errors.New("module analysis hook failed")
-
-		mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
-		_, _, err := AnalyzeModuleChanges(false, gomodcache, projectDir, mods, 0,
-			func(allModuleData []ModuleAnalysisData) error {
-				return expectedErr
-			})
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "post-module analysis hook failed")
-		assert.Contains(t, err.Error(), expectedErr.Error())
 	})
 }
 
@@ -1684,22 +1648,15 @@ func TestDefaultModuleChangeProvider_AnalyzeModuleChanges_WithHook(t *testing.T)
 	addVersion("v1.0.0", "package testmod\n\nfunc Foo() int { return 1 }\n")
 	addVersion("v1.1.0", "package testmod\n\nfunc Foo() int { return 2 }\n")
 
-	var hookCalled bool
-	provider := &DefaultModuleChangeProvider{
-		PostModuleAnalysis: func(allModuleData []ModuleAnalysisData) error {
-			hookCalled = true
-			return nil
-		},
-	}
+	provider := &DefaultModuleChangeProvider{}
 
 	config := Config{
 		Gomodcache: gomodcache,
 		AbsProjDir: projectDir,
 	}
 
-	mods := []ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
+	mods := []*ModuleChange{{Name: testModName, PriorVersion: "v1.0.0", NewVersion: "v1.1.0"}}
 	_, _, err := provider.AnalyzeModuleChanges(config, false, mods, 0)
 
 	require.NoError(t, err)
-	assert.True(t, hookCalled)
 }

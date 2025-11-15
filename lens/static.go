@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -26,9 +27,9 @@ const debugCallChain = "" // Set to function name to log call chains with functi
 // CallerStaticAnalysis performs static analysis to determine which project functions call
 // the provided moduleChanges. Returned are the functions in the project that may delegate
 // to the updated module functions, along with the call graph, project packages, and module packages with type information.
-func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, []*packages.Package, []*packages.Package, error) {
+func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir, gopath, gomodcache string) ([]*CallerFunction, ReachableModuleChange, *callgraph.Graph, []*packages.Package, []*packages.Package, error) {
 	// Load all non-test packages in the project and build SSA and call-graph using CHA (class hierarchy analysis)
-	cg, _, projectPkgs, modulePkgs, err := LoadProjectCallGraph(projectDir, false)
+	cg, _, projectPkgs, modulePkgs, err := LoadProjectCallGraph(projectDir, gopath, gomodcache, false)
 	if err != nil || cg == nil {
 		return nil, nil, nil, nil, nil, err
 	}
@@ -186,9 +187,9 @@ func IsGeneratedFile(filename string) bool {
 // TestStaticAnalysis loads all packages (including test packages), then for each
 // provided CallerFunction (project function from module analysis), performs a reverse DFS
 // to find any test functions that eventually lead to the given project functions.
-func TestStaticAnalysis(callers []*CallerFunction, projectDir string) ([]*TestFunction, error) {
+func TestStaticAnalysis(callers []*CallerFunction, projectDir, gopath, gomodcache string) ([]*TestFunction, error) {
 	// Load all packages including tests and build SSA + call-graph
-	cg, err := loadProjectPackageCallGraph(projectDir, true)
+	cg, err := loadProjectPackageCallGraph(projectDir, gopath, gomodcache, true)
 	if err != nil || cg == nil {
 		return nil, err
 	}
@@ -286,19 +287,20 @@ func TestStaticAnalysis(callers []*CallerFunction, projectDir string) ([]*TestFu
 //   analysis may be able to provide more accurate traversal, and reduce the size of our implementation
 
 // loadProjectPackageCallGraph loads the project packages and creates an SSA Program and call-graph from the packages.
-func loadProjectPackageCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, error) {
-	cg, _, _, _, err := LoadProjectCallGraph(projectDir, includeTests)
+func loadProjectPackageCallGraph(projectDir, gopath, gomodcache string, includeTests bool) (*callgraph.Graph, error) {
+	cg, _, _, _, err := LoadProjectCallGraph(projectDir, gopath, gomodcache, includeTests)
 	return cg, err
 }
 
 // LoadProjectCallGraph loads the project packages and creates an SSA Program and call-graph.
 // Returns the call graph, SSA program, project packages, module packages, and any error encountered.
-func LoadProjectCallGraph(projectDir string, includeTests bool) (*callgraph.Graph, *ssa.Program, []*packages.Package, []*packages.Package, error) {
+func LoadProjectCallGraph(projectDir, gopath, gomodcache string, includeTests bool) (*callgraph.Graph, *ssa.Program, []*packages.Package, []*packages.Package, error) {
 	cfg := &packages.Config{
 		Dir:   projectDir,
 		Tests: includeTests,
 		Mode: packages.NeedFiles | packages.NeedSyntax | packages.NeedName |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo,
+		Env: append(os.Environ(), GoEnv(gopath, gomodcache)...),
 	}
 
 	var patterns []string
