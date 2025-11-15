@@ -478,6 +478,8 @@ func TestNewAnalysisEngine(t *testing.T) {
 
 // Helper function to create mock test result bytes
 func createMockTestResultBytes(t *testing.T, funcName string) []byte {
+	t.Helper()
+
 	testResult := TestResult{
 		TestFunction: MinimumTestFunction{
 			FunctionName: funcName,
@@ -1289,22 +1291,18 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		t.Parallel()
 
 		var hookCalled bool
-		var receivedModuleChanges []*ModuleFunction
 		var receivedCallersCount, receivedReachableCount int
 		var receivedIdentEdges map[string][]string
 		provider := &DefaultCallerAnalysisProvider{
 			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
-				identEdges map[string][]string, moduleChanges []*ModuleFunction,
-				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				identEdges map[string][]string, callers []*CallerFunction, reachable ReachableModuleChange) error {
 				hookCalled = true
-				receivedModuleChanges = moduleChanges
 				receivedCallersCount = len(callers)
 				receivedReachableCount = len(reachable)
 				receivedIdentEdges = identEdges
 				return nil
 			},
 		}
-
 		config := createTestConfig(t)
 		moduleChanges := []*ModuleFunction{
 			{Function: Function{FunctionName: "Func1"}},
@@ -1314,7 +1312,6 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.True(t, hookCalled)
-		assert.Equal(t, moduleChanges, receivedModuleChanges)
 		// receivedCallersCount and receivedReachableCount may be 0 in test environment
 		assert.GreaterOrEqual(t, receivedCallersCount, 0)
 		assert.GreaterOrEqual(t, receivedReachableCount, 0)
@@ -1331,8 +1328,7 @@ func TestDefaultCallerAnalysisProvider_PostCallerAnalysis(t *testing.T) {
 		expectedErr := errors.New("hook analysis failed")
 		provider := &DefaultCallerAnalysisProvider{
 			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
-				identEdges map[string][]string, moduleChanges []*ModuleFunction,
-				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				identEdges map[string][]string, callers []*CallerFunction, reachable ReachableModuleChange) error {
 				return expectedErr
 			},
 		}
@@ -1399,8 +1395,7 @@ func HelperFunction() string {
 
 		provider := &DefaultCallerAnalysisProvider{
 			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
-				identEdges map[string][]string, moduleChanges []*ModuleFunction,
-				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				identEdges map[string][]string, callers []*CallerFunction, reachable ReachableModuleChange) error {
 				receivedProjectPackages = projectPackages
 				receivedModulePackages = modulePackages
 				return nil
@@ -1432,9 +1427,10 @@ func HelperFunction() string {
 		var mainPkg *packages.Package
 		var helperPkg *packages.Package
 		for _, pkg := range receivedProjectPackages {
-			if pkg.Name == "main" {
+			switch pkg.Name {
+			case "main":
 				mainPkg = pkg
-			} else if pkg.Name == "helper" {
+			case "helper":
 				helperPkg = pkg
 			}
 		}
@@ -1506,8 +1502,7 @@ func UseModules() {
 		var receivedProjectPackages, receivedModulePackages []*packages.Package
 		provider := &DefaultCallerAnalysisProvider{
 			PostCallerAnalysis: func(projectPackages []*packages.Package, modulePackages []*packages.Package,
-				identEdges map[string][]string, moduleChanges []*ModuleFunction,
-				callers []*CallerFunction, reachable ReachableModuleChange) error {
+				identEdges map[string][]string, callers []*CallerFunction, reachable ReachableModuleChange) error {
 				receivedProjectPackages = projectPackages
 				receivedModulePackages = modulePackages
 				return nil

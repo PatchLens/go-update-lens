@@ -275,8 +275,7 @@ type DefaultCallerAnalysisProvider struct {
 	// Returns:
 	//   - error: Any fatal error encountered during analysis.
 	PostCallerAnalysis func(projectPackages []*packages.Package, modulePackages []*packages.Package,
-		identEdges map[string][]string, moduleChanges []*ModuleFunction,
-		callers []*CallerFunction, reachable ReachableModuleChange) error
+		identEdges map[string][]string, callers []*CallerFunction, reachable ReachableModuleChange) error
 }
 
 func (d *DefaultCallerAnalysisProvider) PerformCallerStaticAnalysis(config Config, moduleChanges []*ModuleFunction) ([]*CallerFunction, ReachableModuleChange, error) {
@@ -289,7 +288,7 @@ func (d *DefaultCallerAnalysisProvider) PerformCallerStaticAnalysis(config Confi
 		// Only extract edges when hook exists
 		identEdges := extractCallGraphEdges(cg)
 		cg = nil //nolint:ineffassign,wastedassign // Allow GC to collect call graph during hook execution
-		if err := d.PostCallerAnalysis(projectPkgs, modulePkgs, identEdges, moduleChanges, callers, reachable); err != nil {
+		if err := d.PostCallerAnalysis(projectPkgs, modulePkgs, identEdges, callers, reachable); err != nil {
 			return nil, nil, fmt.Errorf("post-caller analysis hook failed: %w", err)
 		}
 	}
