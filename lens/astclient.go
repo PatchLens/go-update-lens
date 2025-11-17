@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"reflect"
@@ -21,6 +22,13 @@ const (
 	lensMonitorServerPort      = 8448
 	lensMonitorFieldMaxRecurse = 100
 	lensMonitorFieldMaxLen     = 1024
+)
+
+// Special float value representations for JSON marshaling
+const (
+	floatValueNaN  = "NaN"
+	floatValuePInf = "+Inf"
+	floatValueNInf = "-Inf"
 )
 
 var (
@@ -155,7 +163,17 @@ func buildLensMonitorField(parentPath string, dst *LensMonitorField, v reflect.V
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		dst.Value = v.Uint()
 	case reflect.Float32, reflect.Float64:
-		dst.Value = v.Float()
+		// JSON doesn't support NaN or Inf, convert to strings
+		f := v.Float()
+		if math.IsNaN(f) {
+			dst.Value = floatValueNaN
+		} else if math.IsInf(f, 1) {
+			dst.Value = floatValuePInf
+		} else if math.IsInf(f, -1) {
+			dst.Value = floatValueNInf
+		} else {
+			dst.Value = f
+		}
 	case reflect.String:
 		dst.Value = limitLensMonitorStringSize(v.String())
 	case reflect.Slice, reflect.Array:
@@ -180,7 +198,29 @@ func buildLensMonitorField(parentPath string, dst *LensMonitorField, v reflect.V
 
 			vals := make([]interface{}, length)
 			for i := 0; i < length; i++ {
-				vals[i] = v.Index(i).Interface()
+				val := v.Index(i).Interface()
+				// Handle NaN/Inf in float slices to prevent JSON marshal errors
+				if elemKind == reflect.Float32 || elemKind == reflect.Float64 {
+					if f, ok := val.(float64); ok {
+						if math.IsNaN(f) {
+							val = floatValueNaN
+						} else if math.IsInf(f, 1) {
+							val = floatValuePInf
+						} else if math.IsInf(f, -1) {
+							val = floatValueNInf
+						}
+					} else if f32, ok := val.(float32); ok {
+						f := float64(f32)
+						if math.IsNaN(f) {
+							val = floatValueNaN
+						} else if math.IsInf(f, 1) {
+							val = floatValuePInf
+						} else if math.IsInf(f, -1) {
+							val = floatValueNInf
+						}
+					}
+				}
+				vals[i] = val
 			}
 			dst.Value = vals
 		case reflect.String:

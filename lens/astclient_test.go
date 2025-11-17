@@ -1,6 +1,8 @@
 package lens
 
 import (
+	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -115,6 +117,108 @@ func TestBuildLensMonitorField(t *testing.T) {
 		s := f.Value.(string)
 		assert.True(t, strings.HasPrefix(s, strings.Repeat("x", lensMonitorFieldMaxLen)))
 		assert.True(t, strings.HasSuffix(s, "…(10 more)"))
+	})
+
+	t.Run("float_nan", func(t *testing.T) {
+		t.Parallel()
+
+		val := math.NaN()
+		f := LensMonitorField{Name: "nan"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "float64", f.Type)
+		assert.Equal(t, "NaN", f.Value)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
+	})
+
+	t.Run("float_positive_inf", func(t *testing.T) {
+		t.Parallel()
+
+		val := math.Inf(1)
+		f := LensMonitorField{Name: "inf"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "float64", f.Type)
+		assert.Equal(t, "+Inf", f.Value)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
+	})
+
+	t.Run("float_negative_inf", func(t *testing.T) {
+		t.Parallel()
+
+		val := math.Inf(-1)
+		f := LensMonitorField{Name: "neginf"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "float64", f.Type)
+		assert.Equal(t, "-Inf", f.Value)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
+	})
+
+	t.Run("float32_nan", func(t *testing.T) {
+		t.Parallel()
+
+		val := float32(math.NaN())
+		f := LensMonitorField{Name: "nan32"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "float32", f.Type)
+		assert.Equal(t, "NaN", f.Value)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
+	})
+
+	t.Run("float_slice_with_special_values", func(t *testing.T) {
+		t.Parallel()
+
+		val := []float64{1.5, math.NaN(), math.Inf(1), 2.5, math.Inf(-1), 3.14}
+		f := LensMonitorField{Name: "floats"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "[]float64", f.Type)
+
+		expected := []interface{}{1.5, "NaN", "+Inf", 2.5, "-Inf", 3.14}
+		assert.Equal(t, expected, f.Value)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
+	})
+
+	t.Run("float32_slice_with_special_values", func(t *testing.T) {
+		t.Parallel()
+
+		val := []float32{1.5, float32(math.NaN()), float32(math.Inf(1)), 2.5}
+		f := LensMonitorField{Name: "floats32"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "[]float32", f.Type)
+
+		expected := []interface{}{float32(1.5), "NaN", "+Inf", float32(2.5)}
+		assert.Equal(t, expected, f.Value)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
+	})
+
+	t.Run("normal_float_unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		val := 3.14159
+		f := LensMonitorField{Name: "pi"}
+		buildLensMonitorField("", &f, reflect.ValueOf(val), 0, make(map[uintptr]string))
+		assert.Equal(t, "float64", f.Type)
+		assert.InDelta(t, 3.14159, f.Value, 0.00001)
+
+		// Verify it can be marshaled to JSON
+		_, err := json.Marshal(f)
+		assert.NoError(t, err)
 	})
 }
 
