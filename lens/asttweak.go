@@ -896,16 +896,29 @@ func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.
 
 	// Build snapshots for the call's arguments
 	for i := range call.Args {
-		// Create synthetic variable with unique name using pointID
+		origArg := call.Args[i]
+
+		// Identifiers: snapshot directly, no temp needed
+		if ident, ok := origArg.(*ast.Ident); ok {
+			snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), ident))
+			continue
+		}
+
+		// Give unnamed expressions a trackable name
 		argVarName := fmt.Sprintf("%s%d_%d", syntheticFieldNamePrefixArg, pointID, i)
 		argIdent := ast.NewIdent(argVarName)
-		origArg := call.Args[i]
 		stmts = append(stmts, &ast.AssignStmt{
 			Lhs: []ast.Expr{argIdent},
 			Tok: token.DEFINE,
 			Rhs: []ast.Expr{origArg},
 		})
-		call.Args[i] = argIdent
+
+		// Literals: keep in call to preserve untyped semantics
+		// Complex expressions: replace with temp to avoid double evaluation
+		if _, isLiteral := origArg.(*ast.BasicLit); !isLiteral {
+			call.Args[i] = argIdent
+		}
+
 		snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), argIdent))
 	}
 
@@ -1375,17 +1388,21 @@ func makeReturnTemp(namePrefix string, i int, expr ast.Expr, typ ast.Expr) (retI
 	iStr := strconv.Itoa(i)
 	retId = ast.NewIdent(namePrefix + iStr)
 	if ident, ok := expr.(*ast.Ident); ok && ident.Name == literalNil {
-		// var retX Type = nil (with explicit type to avoid "untyped nil" error)
+		// nil requires explicit type
 		stmts = []ast.Stmt{
 			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
 				&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{expr}},
 			}}},
 		}
 	} else {
-		// Normal path: tmpX := expr; var retX Type = tmpX
+		// Use var tmpX Type = expr (not tmpX := expr) to allow untyped constants to convert to named types
 		tmpId := ast.NewIdent(syntheticFieldNamePrefixTemp + iStr)
 		stmts = []ast.Stmt{
-			&ast.AssignStmt{Lhs: []ast.Expr{tmpId}, Tok: token.DEFINE, Rhs: []ast.Expr{expr}},
+			// var tmpX Type = expr (typed temp for monitoring, allows conversion)
+			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
+				&ast.ValueSpec{Names: []*ast.Ident{tmpId}, Type: typ, Values: []ast.Expr{expr}},
+			}}},
+			// var retX Type = tmpX (typed return variable)
 			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
 				&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{tmpId}},
 			}}},

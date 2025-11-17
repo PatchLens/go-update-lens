@@ -599,7 +599,7 @@ func Foo() interface{} {
 	require.NoError(t, err)
 
 	require.Len(t, blk.List, 4)
-	_, ok := blk.List[0].(*ast.AssignStmt)
+	_, ok := blk.List[0].(*ast.DeclStmt)
 	assert.True(t, ok)
 
 	var foundTmp bool
