@@ -392,33 +392,33 @@ func (lr *lensReader) readValue() (interface{}, []LensMonitorField, error) {
 	}
 
 	switch tag {
-	case lensTagNil:
+	case lensTypeTagNil:
 		return nil, nil, nil
-	case lensTagBool:
+	case lensTypeTagBool:
 		b, err := lr.readByte()
 		if err != nil {
 			return nil, nil, err
 		}
 		return b != 0, nil, nil
-	case lensTagInt32:
+	case lensTypeTagInt32:
 		v, err := lr.readSignedVarint()
 		return int32(v), nil, err
-	case lensTagInt64:
+	case lensTypeTagInt64:
 		v, err := lr.readSignedVarint()
 		return v, nil, err
-	case lensTagUint32:
+	case lensTypeTagUint32:
 		v, err := lr.readVarint()
 		return uint32(v), nil, err
-	case lensTagUint64:
+	case lensTypeTagUint64:
 		v, err := lr.readVarint()
 		return v, nil, err
-	case lensTagFloat32:
+	case lensTypeTagFloat32:
 		v, err := lr.readFloat32()
 		return v, nil, err
-	case lensTagFloat64:
+	case lensTypeTagFloat64:
 		v, err := lr.readFloat64()
 		return v, nil, err
-	case lensTagComplex128:
+	case lensTypeTagComplex128:
 		re, err := lr.readFloat64()
 		if err != nil {
 			return nil, nil, err
@@ -428,37 +428,37 @@ func (lr *lensReader) readValue() (interface{}, []LensMonitorField, error) {
 			return nil, nil, err
 		}
 		return complex(re, im), nil, nil
-	case lensTagString:
+	case lensTypeTagString:
 		v, err := lr.readString()
 		return v, nil, err
-	case lensTagBoolSlice:
+	case lensTypeTagBoolSlice:
 		v, err := lr.readBoolSlice()
 		return v, nil, err
-	case lensTagBytes:
+	case lensTypeTagBytes:
 		v, err := lr.readBytes()
 		return v, nil, err
-	case lensTagInt32Slice:
+	case lensTypeTagInt32Slice:
 		v, err := lr.readInt32Slice()
 		return v, nil, err
-	case lensTagInt64Slice:
+	case lensTypeTagInt64Slice:
 		v, err := lr.readInt64Slice()
 		return v, nil, err
-	case lensTagUint32Slice:
+	case lensTypeTagUint32Slice:
 		v, err := lr.readUint32Slice()
 		return v, nil, err
-	case lensTagUint64Slice:
+	case lensTypeTagUint64Slice:
 		v, err := lr.readUint64Slice()
 		return v, nil, err
-	case lensTagFloat32Slice:
+	case lensTypeTagFloat32Slice:
 		v, err := lr.readFloat32Slice()
 		return v, nil, err
-	case lensTagFloat64Slice:
+	case lensTypeTagFloat64Slice:
 		v, err := lr.readFloat64Slice()
 		return v, nil, err
-	case lensTagStringSlice:
+	case lensTypeTagStringSlice:
 		v, err := lr.readStringSlice()
 		return v, nil, err
-	case lensTagSlice, lensTagMap, lensTagStruct:
+	case lensTypeTagSlice, lensTypeTagMap, lensTypeTagStruct:
 		count, err := lr.readVarint()
 		if err != nil {
 			return nil, nil, err

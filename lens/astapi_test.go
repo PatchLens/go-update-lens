@@ -414,7 +414,7 @@ func TestStreamFieldComposites(t *testing.T) {
 		type empty struct{}
 		val := empty{}
 		f := streamFieldToField(t, "e", val)
-		// Empty struct uses lensTagStruct with 0 children
+		// Empty struct uses lensTypeTagStruct with 0 children
 		assert.Nil(t, f.Value)
 		assert.Empty(t, f.Children)
 	})
@@ -480,7 +480,7 @@ func TestStreamFieldEdgeCases(t *testing.T) {
 
 	t.Run("read_truncated_data", func(t *testing.T) {
 		var buf bytes.Buffer
-		buf.WriteByte(lensTagInt64) // tag for int64 but no data
+		buf.WriteByte(lensTypeTagInt64) // tag for int64 but no data
 		_, _, err := newLensReader(&buf, 1024).readValue()
 		require.Error(t, err)
 	})

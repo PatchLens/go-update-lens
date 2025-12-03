@@ -22,30 +22,30 @@ type LensMonitorStackFrame struct {
 // The Value field in LensMonitorField can only contain these normalized types.
 const (
 	// Primitives (0x00-0x1F) - value only, no children
-	lensTagNil        byte = 0x00 // nothing follows
-	lensTagBool       byte = 0x01 // 1 byte: 0=false, 1=true
-	lensTagInt32      byte = 0x02 // zigzag varint
-	lensTagInt64      byte = 0x03 // zigzag varint
-	lensTagUint32     byte = 0x04 // varint
-	lensTagUint64     byte = 0x05 // varint
-	lensTagFloat32    byte = 0x06 // 4 bytes little-endian IEEE 754
-	lensTagFloat64    byte = 0x07 // 8 bytes little-endian IEEE 754
-	lensTagComplex128 byte = 0x08 // 16 bytes: real (float64) + imag (float64)
-	lensTagString     byte = 0x09 // varint length + UTF-8 bytes
+	lensTypeTagNil        byte = 0x00 // nothing follows
+	lensTypeTagBool       byte = 0x01 // 1 byte: 0=false, 1=true
+	lensTypeTagInt32      byte = 0x02 // zigzag varint
+	lensTypeTagInt64      byte = 0x03 // zigzag varint
+	lensTypeTagUint32     byte = 0x04 // varint
+	lensTypeTagUint64     byte = 0x05 // varint
+	lensTypeTagFloat32    byte = 0x06 // 4 bytes little-endian IEEE 754
+	lensTypeTagFloat64    byte = 0x07 // 8 bytes little-endian IEEE 754
+	lensTypeTagComplex128 byte = 0x08 // 16 bytes: real (float64) + imag (float64)
+	lensTypeTagString     byte = 0x09 // varint length + UTF-8 bytes
 
 	// Slices (0x20-0x3F) - length + inline data, no children
-	lensTagBoolSlice    byte = 0x20 // varint count + bool bytes
-	lensTagBytes        byte = 0x21 // varint length + raw bytes
-	lensTagInt32Slice   byte = 0x22 // varint count + zigzag varints
-	lensTagInt64Slice   byte = 0x23 // varint count + zigzag varints
-	lensTagUint32Slice  byte = 0x24 // varint count + varints
-	lensTagUint64Slice  byte = 0x25 // varint count + varints
-	lensTagFloat32Slice byte = 0x26 // varint count + float32s
-	lensTagFloat64Slice byte = 0x27 // varint count + float64s
-	lensTagStringSlice  byte = 0x28 // varint count + length-prefixed strings
+	lensTypeTagBoolSlice    byte = 0x20 // varint count + bool bytes
+	lensTypeTagBytes        byte = 0x21 // varint length + raw bytes
+	lensTypeTagInt32Slice   byte = 0x22 // varint count + zigzag varints
+	lensTypeTagInt64Slice   byte = 0x23 // varint count + zigzag varints
+	lensTypeTagUint32Slice  byte = 0x24 // varint count + varints
+	lensTypeTagUint64Slice  byte = 0x25 // varint count + varints
+	lensTypeTagFloat32Slice byte = 0x26 // varint count + float32s
+	lensTypeTagFloat64Slice byte = 0x27 // varint count + float64s
+	lensTypeTagStringSlice  byte = 0x28 // varint count + length-prefixed strings
 
 	// Containers (0x40-0x5F) - children count + child fields
-	lensTagMap    byte = 0x40 // varint count + child fields (key as name)
-	lensTagStruct byte = 0x41 // varint count + child fields
-	lensTagSlice  byte = 0x42 // varint count + child fields (index as name, for complex element types)
+	lensTypeTagMap    byte = 0x40 // varint count + child fields (key as name)
+	lensTypeTagStruct byte = 0x41 // varint count + child fields
+	lensTypeTagSlice  byte = 0x42 // varint count + child fields (index as name, for complex element types)
 )

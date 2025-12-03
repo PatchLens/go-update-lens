@@ -254,7 +254,7 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 		addr := v.Pointer()
 		if cycleName, ok := visited[addr]; ok {
 			lw.writeString(v.Type().String())
-			lw.writeByte(lensTagString)
+			lw.writeByte(lensTypeTagString)
 			lw.writeString("<cycle:" + cycleName + ">")
 			return
 		}
@@ -265,18 +265,18 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 	for v.IsValid() && (v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) {
 		if v.IsNil() {
 			lw.writeString(v.Type().String())
-			lw.writeByte(lensTagNil)
+			lw.writeByte(lensTypeTagNil)
 			return
 		}
 		v = v.Elem()
 	}
 	if !v.IsValid() {
 		lw.writeString("invalid")
-		lw.writeByte(lensTagNil)
+		lw.writeByte(lensTypeTagNil)
 		return
 	} else if depth >= lensMonitorFieldMaxRecurse {
 		lw.writeString(v.Type().String())
-		lw.writeByte(lensTagString)
+		lw.writeByte(lensTypeTagString)
 		lw.writeString("<max-depth>")
 		return
 	}
@@ -289,7 +289,7 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 		vKind == reflect.Func || vKind == reflect.Chan || vKind == reflect.Interface {
 		if v.IsNil() {
 			lw.writeString(vType.String())
-			lw.writeByte(lensTagNil)
+			lw.writeByte(lensTypeTagNil)
 			return
 		}
 	}
@@ -303,7 +303,7 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 		addr := v.Pointer()
 		if cycleName, ok := visited[addr]; ok {
 			lw.writeString(vType.String())
-			lw.writeByte(lensTagString)
+			lw.writeByte(lensTypeTagString)
 			lw.writeString("<cycle:" + cycleName + ">")
 			return
 		}
@@ -314,7 +314,7 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 
 	switch vKind {
 	case reflect.Bool:
-		lw.writeByte(lensTagBool)
+		lw.writeByte(lensTypeTagBool)
 		if v.Bool() {
 			lw.writeByte(1)
 		} else {
@@ -322,44 +322,44 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 		}
 
 	case reflect.Int8, reflect.Int16, reflect.Int32:
-		lw.writeByte(lensTagInt32)
+		lw.writeByte(lensTypeTagInt32)
 		lw.writeSignedVarint(v.Int())
 
 	case reflect.Int, reflect.Int64:
-		lw.writeByte(lensTagInt64)
+		lw.writeByte(lensTypeTagInt64)
 		lw.writeSignedVarint(v.Int())
 
 	case reflect.Uint8, reflect.Uint16, reflect.Uint32:
-		lw.writeByte(lensTagUint32)
+		lw.writeByte(lensTypeTagUint32)
 		lw.writeVarint(v.Uint())
 
 	case reflect.Uint, reflect.Uint64, reflect.Uintptr:
-		lw.writeByte(lensTagUint64)
+		lw.writeByte(lensTypeTagUint64)
 		lw.writeVarint(v.Uint())
 
 	case reflect.Float32:
-		lw.writeByte(lensTagFloat32)
+		lw.writeByte(lensTypeTagFloat32)
 		lw.writeFloat32(float32(v.Float()))
 
 	case reflect.Float64:
-		lw.writeByte(lensTagFloat64)
+		lw.writeByte(lensTypeTagFloat64)
 		lw.writeFloat64(v.Float())
 
 	case reflect.Complex64, reflect.Complex128:
-		lw.writeByte(lensTagComplex128)
+		lw.writeByte(lensTypeTagComplex128)
 		c := v.Complex()
 		lw.writeFloat64(real(c))
 		lw.writeFloat64(imag(c))
 
 	case reflect.String:
-		lw.writeByte(lensTagString)
+		lw.writeByte(lensTypeTagString)
 		lw.writeString(limitLensMonitorStringSize(v.String()))
 
 	case reflect.Slice, reflect.Array:
 		lw.streamValueSlice(v, vType, depth, visited, valuePath)
 
 	case reflect.Map:
-		lw.writeByte(lensTagMap)
+		lw.writeByte(lensTypeTagMap)
 		keys := v.MapKeys()
 		lw.writeVarint(uint64(len(keys)))
 		for _, k := range keys {
@@ -374,7 +374,7 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 			v = tmp
 		}
 		numFields := v.NumField()
-		lw.writeByte(lensTagStruct)
+		lw.writeByte(lensTypeTagStruct)
 		lw.writeVarint(uint64(numFields))
 		for i := 0; i < numFields; i++ {
 			sf := vType.Field(i)
@@ -386,15 +386,15 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 		}
 
 	case reflect.Func:
-		lw.writeByte(lensTagString)
+		lw.writeByte(lensTypeTagString)
 		lw.writeString("<func>")
 
 	case reflect.Chan:
-		lw.writeByte(lensTagString)
+		lw.writeByte(lensTypeTagString)
 		lw.writeString("<chan>")
 
 	default:
-		lw.writeByte(lensTagString)
+		lw.writeByte(lensTypeTagString)
 		lw.writeString(fmt.Sprint(v.Interface()))
 	}
 }
@@ -414,7 +414,7 @@ func (lw *lensMsgEncoder) streamValueSlice(v reflect.Value, vType reflect.Type, 
 		for i := 0; i < length; i++ {
 			vals[i] = v.Index(i).Bool()
 		}
-		lw.writeByte(lensTagBoolSlice)
+		lw.writeByte(lensTypeTagBoolSlice)
 		lw.writeVarint(uint64(len(vals)))
 		for i := 0; i < len(vals); i += 8 {
 			var b byte
@@ -427,14 +427,14 @@ func (lw *lensMsgEncoder) streamValueSlice(v reflect.Value, vType reflect.Type, 
 		}
 
 	case reflect.Int8, reflect.Int16, reflect.Int32:
-		lw.writeByte(lensTagInt32Slice)
+		lw.writeByte(lensTypeTagInt32Slice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeSignedVarint(v.Index(i).Int())
 		}
 
 	case reflect.Int, reflect.Int64:
-		lw.writeByte(lensTagInt64Slice)
+		lw.writeByte(lensTypeTagInt64Slice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeSignedVarint(v.Index(i).Int())
@@ -454,51 +454,51 @@ func (lw *lensMsgEncoder) streamValueSlice(v reflect.Value, vType reflect.Type, 
 			}
 		}
 		if utf8.Valid(data) {
-			lw.writeByte(lensTagString)
+			lw.writeByte(lensTypeTagString)
 			lw.writeString(limitLensMonitorStringSize(string(data)))
 		} else {
-			lw.writeByte(lensTagBytes)
+			lw.writeByte(lensTypeTagBytes)
 			lw.writeVarint(uint64(len(data)))
 			_, _ = lw.w.Write(data)
 		}
 
 	case reflect.Uint16, reflect.Uint32:
-		lw.writeByte(lensTagUint32Slice)
+		lw.writeByte(lensTypeTagUint32Slice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeVarint(v.Index(i).Uint())
 		}
 
 	case reflect.Uint, reflect.Uint64, reflect.Uintptr:
-		lw.writeByte(lensTagUint64Slice)
+		lw.writeByte(lensTypeTagUint64Slice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeVarint(v.Index(i).Uint())
 		}
 
 	case reflect.Float32:
-		lw.writeByte(lensTagFloat32Slice)
+		lw.writeByte(lensTypeTagFloat32Slice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeFloat32(float32(v.Index(i).Float()))
 		}
 
 	case reflect.Float64:
-		lw.writeByte(lensTagFloat64Slice)
+		lw.writeByte(lensTypeTagFloat64Slice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeFloat64(v.Index(i).Float())
 		}
 
 	case reflect.String:
-		lw.writeByte(lensTagStringSlice)
+		lw.writeByte(lensTypeTagStringSlice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.writeString(limitLensMonitorStringSize(v.Index(i).String()))
 		}
 
 	default:
-		lw.writeByte(lensTagSlice)
+		lw.writeByte(lensTypeTagSlice)
 		lw.writeVarint(uint64(length))
 		for i := 0; i < length; i++ {
 			lw.streamField("["+strconv.Itoa(i)+"]", v.Index(i), depth+1, visited, valuePath)
