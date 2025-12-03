@@ -7,7 +7,9 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"runtime"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-analyze/charts"
@@ -71,12 +73,116 @@ func BenchmarkReverseDFSDeep(b *testing.B) {
 	}
 }
 
+type benchmarkPointHandler struct {
+	msgCount      atomic.Uint32
+	parentHandler astPointHandler
+}
+
+func (b *benchmarkPointHandler) HandleFuncPoint(point LensMonitorMessagePoint) {
+	b.msgCount.Add(1)
+
+	if b.parentHandler != nil {
+		b.parentHandler.HandleFuncPoint(point)
+	}
+}
+
+func (b *benchmarkPointHandler) HandleFuncPointState(state LensMonitorMessagePointState) {
+	b.msgCount.Add(1)
+
+	if b.parentHandler != nil {
+		b.parentHandler.HandleFuncPointState(state)
+	}
+}
+
+func (b *benchmarkPointHandler) HandleFuncPointPanic(pointPanic LensMonitorMessagePointPanic) {
+	b.msgCount.Add(1)
+
+	if b.parentHandler != nil {
+		b.parentHandler.HandleFuncPointPanic(pointPanic)
+	}
+}
+
+func (b *benchmarkPointHandler) waitForMsgs(count uint32) {
+	for b.msgCount.Load() < count {
+		runtime.Gosched()
+	}
+}
+
 func BenchmarkASTClientServer(b *testing.B) {
-	pointMap := map[int]*string{
+	u32 := uint32(32)
+	u64 := uint64(64)
+	i32 := int32(32)
+	i64 := int64(64)
+	f32 := float32(32.32)
+	f64 := 64.64
+
+	boolSlice := []bool{
+		true, false, true, false, true, false, true, false,
+		false, true, false, true, false, true, false, true,
+		true, false, true, false, true, false, true, false,
+		false, true, false, true, false, true, false, true,
+		true, false, true, false, true, false, true, false,
+		true, false, true, false, true, false, true, false,
+		true, false, true, false, true, false, true, false,
+		true, false, true, false, true, false, true, false,
+	}
+	uiSlice := []uint64{0, 2, 4, 8, 16, 32, 64, 128}
+	iSlice := []int64{-128, -64, -32, -16, -8, -4, -2, 0, 2, 4, 8, 16, 32, 64, 128}
+	fSlice := []float64{-128.128, -128, -64.64, -64, -32.32, -32, -16.16, -16, -8.8, -8, -4.4, -4, -2.2, -2,
+		0, 0.0, 2, 2.2, 8, 8.8, 16, 16.16, 32, 32.32, 64, 64.64, 128, 128.128}
+	sSlice := []string{"foo", "bar", "hello world", "strings"}
+	var bSlice []byte
+	for _, s := range sSlice {
+		bSlice = append(bSlice, s...)
+	}
+
+	pointMap := map[uint32]*string{
 		1: charts.Ptr("fooStr"),
 		2: charts.Ptr("barStr"),
 	}
-	srv, err := astExecServerStart(lensMonitorServerHost, lensMonitorServerPort, nil)
+	srv, err := astExecServerStart(lensMonitorServerHost, lensMonitorServerPort, nil, 1024)
+	require.NoError(b, err)
+	defer func() {
+		_ = srv.Stop(b.Context())
+	}()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		monitor := &benchmarkPointHandler{}
+		err = srv.SetPointHandler(monitor)
+		require.NoError(b, err)
+
+		SendLensPointMessage(1)
+		SendLensPointStateMessage(2,
+			LensMonitorFieldSnapshot{Name: "b", Val: b},
+			LensMonitorFieldSnapshot{Name: "u32", Val: u32},
+			LensMonitorFieldSnapshot{Name: "u64", Val: u64},
+			LensMonitorFieldSnapshot{Name: "i32", Val: i32},
+			LensMonitorFieldSnapshot{Name: "i64", Val: i64},
+			LensMonitorFieldSnapshot{Name: "f32", Val: f32},
+			LensMonitorFieldSnapshot{Name: "f64", Val: f64},
+			LensMonitorFieldSnapshot{Name: "f64", Val: f64},
+			LensMonitorFieldSnapshot{Name: "boolSlice", Val: boolSlice},
+			LensMonitorFieldSnapshot{Name: "uiSlice", Val: uiSlice},
+			LensMonitorFieldSnapshot{Name: "iSlice", Val: iSlice},
+			LensMonitorFieldSnapshot{Name: "fSlice", Val: fSlice},
+			LensMonitorFieldSnapshot{Name: "sSlice", Val: sSlice},
+			LensMonitorFieldSnapshot{Name: "bSlice", Val: bSlice},
+			LensMonitorFieldSnapshot{Name: "pointMap", Val: pointMap},
+			LensMonitorFieldSnapshot{Name: "monitor", Val: monitor},
+			LensMonitorFieldSnapshot{Name: "srv", Val: srv})
+
+		monitor.waitForMsgs(2)
+	}
+	b.StopTimer()
+}
+
+func BenchmarkASTClientServerMonitor(b *testing.B) {
+	pointMap := map[uint32]*string{
+		1: charts.Ptr("fooStr"),
+		2: charts.Ptr("barStr"),
+	}
+	srv, err := astExecServerStart(lensMonitorServerHost, lensMonitorServerPort, nil, 1024)
 	require.NoError(b, err)
 	defer func() {
 		_ = srv.Stop(b.Context())
@@ -85,7 +191,10 @@ func BenchmarkASTClientServer(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		monitor := newTestMonitor(nil, "", "fakeProjectDir", pointMap, pointMap, pointMap, pointMap, nil)
-		err = srv.SetPointHandler(monitor)
+		benchMonitor := &benchmarkPointHandler{
+			parentHandler: monitor,
+		}
+		err = srv.SetPointHandler(benchMonitor)
 		require.NoError(b, err)
 
 		SendLensPointMessage(1)
@@ -94,6 +203,9 @@ func BenchmarkASTClientServer(b *testing.B) {
 			LensMonitorFieldSnapshot{Name: "pointMap", Val: pointMap},
 			LensMonitorFieldSnapshot{Name: "monitor", Val: monitor},
 			LensMonitorFieldSnapshot{Name: "srv", Val: srv})
+
+		benchMonitor.waitForMsgs(2)
+		monitor.wait.Wait() // wait till monitor processing completes
 	}
 	b.StopTimer()
 }

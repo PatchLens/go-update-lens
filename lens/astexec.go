@@ -66,6 +66,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	}()
 	for i := 0; i < serverCount; i++ {
 		srv, err := astExecServerStart(lensMonitorServerHost, portStart+i, nil)
+		log.Printf("Test Execution Monitor started on %s:%d", lensMonitorServerHost, portStart+i)
 		if err != nil {
 			return 0, 0, nil, nil, err
 		}

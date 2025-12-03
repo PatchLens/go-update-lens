@@ -58,7 +58,6 @@ func astExecServerStart(host string, port int, pointHandler astPointHandler) (*a
 	wg.Wait()
 	time.Sleep(100 * time.Millisecond) // short wait to ensure error is communicated
 
-	log.Printf("Test Execution Monitor started on %s", addr)
 	return s, s.errCheck()
 }
 
