@@ -121,8 +121,8 @@ func PrepareReportData(changedModules []*ModuleChange, projectCallingFunctions [
 		relevantProjectFunctionMap[f.FunctionIdent] = true
 	}
 
-	relevantProjectFunctionIdents = slices.Collect(maps.Keys(relevantProjectFunctionMap))
-	reachableModuleFunctionsIdents = slices.Collect(maps.Keys(reachableModuleFunctionMap))
+	relevantProjectFunctionIdents = slices.Sorted(maps.Keys(relevantProjectFunctionMap))
+	reachableModuleFunctionsIdents = slices.Sorted(maps.Keys(reachableModuleFunctionMap))
 
 	relevantTestFunctionsIdents = make([]string, len(relevantTestFunctions))
 	for i := range relevantTestFunctions {
@@ -131,6 +131,7 @@ func PrepareReportData(changedModules []*ModuleChange, projectCallingFunctions [
 			syntheticTestFuncCount++
 		}
 	}
+	slices.Sort(relevantTestFunctionsIdents)
 	slices.SortFunc(testResults, func(a, b TestReport) int { // keep consistent order in report
 		return strings.Compare(a.OriginalResult.TestFunction.FunctionIdent, b.OriginalResult.TestFunction.FunctionIdent)
 	})
@@ -643,7 +644,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 				}
 				lines++
 
-				fieldChangeStr := callerIdent + "[" + strings.Join(slices.Collect(maps.Keys(fieldMap)), "|") + "]"
+				fieldChangeStr := callerIdent + "[" + strings.Join(slices.Sorted(maps.Keys(fieldMap)), "|") + "]"
 				fieldChangeStr += fieldChangeStr
 				if len(fieldChangeStr) > 66 {
 					fieldChangeStr = fieldChangeStr[:64] + ".."
