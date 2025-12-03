@@ -45,8 +45,8 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	storage Storage, maxVariableRecurse, maxFieldLen int, // values impact memory usage
 	changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
 	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
-	preUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error)) (int, int, Storage, Storage, error) {
+	preUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error)) (int, int, Storage, Storage, error) {
 	env := GoEnv(gopath, gomodcache)
 
 	if err := goCacheClean(env); err != nil { // will be cleaned at the end of each analysis also
@@ -65,7 +65,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 		}
 	}()
 	for i := 0; i < serverCount; i++ {
-		srv, err := astExecServerStart(lensMonitorServerHost, portStart+i, nil)
+		srv, err := astExecServerStart(lensMonitorServerHost, portStart+i, nil, maxFieldLen)
 		log.Printf("Test Execution Monitor started on %s:%d", lensMonitorServerHost, portStart+i)
 		if err != nil {
 			return 0, 0, nil, nil, err
@@ -163,8 +163,8 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	srvChan chan *astServer, goroot, projectDir string, stableResultsStorage Storage, storage Storage,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction,
-	preUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error)) (int, int, error) {
+	preUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error)) (int, int, error) {
 	astEditor := &ASTModifier{}
 	defer func() {
 		errs := astEditor.Restore(env)
@@ -279,12 +279,12 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 
 func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen int,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction,
-	preUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier) (map[int]*string, error)) (
-	map[int]*string, map[int]*string, map[int]*string, map[int]*string, map[int]*string, error) {
+	preUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error),
+	postUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error)) (
+	map[uint32]*string, map[uint32]*string, map[uint32]*string, map[uint32]*string, map[uint32]*string, error) {
 	pointIdLock := sync.Mutex{}
-	projectStatePointIdToIdent := make(map[int]*string)
-	projectPanicPointIdToIdent := make(map[int]*string)
+	projectStatePointIdToIdent := make(map[uint32]*string)
+	projectPanicPointIdToIdent := make(map[uint32]*string)
 	projectPkgs := make([]string, 0, len(callerFunctions))
 	errGrp := ErrGroupLimitCPU()
 	fileFuncHandler := func(funcs []*CallerFunction) error {
@@ -293,8 +293,8 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 		} else if funcs[0].FilePath != funcs[len(funcs)-1].FilePath {
 			return errors.New("unexpected file batch inconsistency")
 		}
-		statePointIds := make(map[int]*string)
-		panicPointIds := make(map[int]*string, len(funcs))
+		statePointIds := make(map[uint32]*string)
+		panicPointIds := make(map[uint32]*string, len(funcs))
 		for _, cf := range funcs {
 			if cf.ReturnPanic { // injecting the recover or return state check on a function which returns in panic could cause a compiler failure
 				// TODO - FUTURE - inject state checks before panics rather than at end of function, only excluding the panic recovery check
@@ -366,8 +366,8 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 	}
 	errGrp.Go(func() error { return fileFuncHandler(currentFileFunctions) })
 
-	moduleEntryPointIdToIdent := make(map[int]*string)
-	modulePanicPointIdToIdent := make(map[int]*string)
+	moduleEntryPointIdToIdent := make(map[uint32]*string)
+	modulePanicPointIdToIdent := make(map[uint32]*string)
 	if len(moduleChanges) > 0 {
 		modulePkgs := make([]string, 0, len(moduleChanges))
 		fileFuncHandler := func(funcs []*ModuleFunction) error {
@@ -376,8 +376,8 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 			} else if funcs[0].FilePath != funcs[len(funcs)-1].FilePath {
 				return errors.New("unexpected file batch inconsistency")
 			}
-			entryPointIds := make(map[int]*string, len(funcs))
-			panicPointIds := make(map[int]*string, len(funcs))
+			entryPointIds := make(map[uint32]*string, len(funcs))
+			panicPointIds := make(map[uint32]*string, len(funcs))
 			for _, mf := range funcs {
 				entryPointId, err := astEditor.InjectFuncPointEntry(&mf.Function)
 				if err != nil {
@@ -448,7 +448,7 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 		return nil, nil, nil, nil, nil, err
 	}
 
-	var extensionStatePointIdToIdent map[int]*string
+	var extensionStatePointIdToIdent map[uint32]*string
 
 	// Handle pre-update extension config (old version)
 	if preUpdateExtensionConfig != nil {
@@ -487,7 +487,7 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 func runMonitoredTest(env []string, goroot, projectDir string, srv *astServer, execOutput *bytes.Buffer,
 	stableResults *monitorStableResults, forceSecondRun bool,
 	projectStatePointIdToIdent, projectPanicPointIdToIdent,
-	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string, tFunc *TestFunction) (string, TestResult, int, []*string, error) {
+	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[uint32]*string, tFunc *TestFunction) (string, TestResult, int, []*string, error) {
 	pointHandler1 := newTestMonitor(stableResults, goroot, projectDir,
 		projectStatePointIdToIdent, projectPanicPointIdToIdent, moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent)
 	if err := srv.SetPointHandler(pointHandler1); err != nil {
@@ -543,7 +543,7 @@ type monitorStableResults struct {
 }
 
 func newTestMonitor(stableResults *monitorStableResults, goroot, projectDir string, projectStatePointIdToIdent, projectPanicPointIdToIdent,
-	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[int]*string) *testMonitor {
+	moduleEntryPointIdToIdent, modulePanicPointIdToIdent, extensionStatePointIdToIdent map[uint32]*string) *testMonitor {
 	return &testMonitor{
 		stableResults:                stableResults,
 		goroot:                       goroot,
@@ -563,11 +563,11 @@ func newTestMonitor(stableResults *monitorStableResults, goroot, projectDir stri
 
 type testMonitor struct {
 	// maps created by AST injection for quick lookups
-	projectStatePointIdToIdent   map[int]*string
-	projectPanicPointIdToIdent   map[int]*string
-	moduleEntryPointIdToIdent    map[int]*string
-	modulePanicPointIdToIdent    map[int]*string
-	extensionStatePointIdToIdent map[int]*string
+	projectStatePointIdToIdent   map[uint32]*string
+	projectPanicPointIdToIdent   map[uint32]*string
+	moduleEntryPointIdToIdent    map[uint32]*string
+	modulePanicPointIdToIdent    map[uint32]*string
+	extensionStatePointIdToIdent map[uint32]*string
 	pointLocks                   *stripedMutex
 
 	// runtime config
@@ -588,7 +588,7 @@ type testMonitor struct {
 	wait                 sync.WaitGroup
 }
 
-func debugLogMonitorStack(pointId int, stack []LensMonitorStackFrame) {
+func debugLogMonitorStack(pointId uint32, stack []LensMonitorStackFrame) {
 	fmt.Printf(">> Stacktrace for monitor point %d:\n", pointId)
 	for _, frame := range stack {
 		fmt.Printf("\t%s:%d\t%s\n", frame.File, frame.Line, frame.Function)
@@ -885,7 +885,7 @@ func (t *testMonitor) getModuleChangesReachCount() int {
 
 func (t *testMonitor) getModuleChangesReached() (out []*string) {
 	t.moduleChangesReached.Range(func(key, _ any) bool {
-		keyId := key.(int)
+		keyId := key.(uint32)
 		if moduleFuncIdent, ok := t.moduleEntryPointIdToIdent[keyId]; ok {
 			out = append(out, moduleFuncIdent)
 		} else {

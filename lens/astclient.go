@@ -2,9 +2,10 @@ package lens
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -22,13 +23,6 @@ const (
 	lensMonitorServerPort      = 8448
 	lensMonitorFieldMaxRecurse = 100
 	lensMonitorFieldMaxLen     = 1024
-)
-
-// Special float value representations for JSON marshaling
-const (
-	floatValueNaN  = "NaN"
-	floatValuePInf = "+Inf"
-	floatValueNInf = "-Inf"
 )
 
 var (
@@ -64,14 +58,19 @@ func init() {
 }
 
 // SendLensPointMessage sends a LensMonitorMessagePoint to the backend.
-func SendLensPointMessage(id int) {
-	em := LensMonitorMessagePoint{
-		PointID: id,
-		TimeNS:  time.Since(lensClientStartTime).Nanoseconds(),
-	}
-	em.Stack = captureLensMonitorStack(3) // skip runtime.Callers, captureLensMonitorStack, and SendEntryMessage
+func SendLensPointMessage(id uint32) {
+	stack := captureLensMonitorStack(3) // skip runtime.Callers, captureLensMonitorStack, this func
 
-	postLensMonitorMessage(lensMonitorEndpointPoint, id, em)
+	var buf bytes.Buffer
+	lensEncodeMessagePoint(&buf, id, time.Since(lensClientStartTime).Nanoseconds(), stack)
+	postLensMonitorMessage(lensMonitorEndpointPoint, id, &buf)
+}
+
+func lensEncodeMessagePoint(w io.Writer, id uint32, timestamp int64, stack []LensMonitorStackFrame) {
+	lw := &lensMsgEncoder{w: w}
+	lw.writeVarint(uint64(id))
+	lw.writeInt64(timestamp)
+	lw.writeStackFrames(stack)
 }
 
 // LensMonitorFieldSnapshot is the only thing the injector needs to build for each
@@ -83,202 +82,30 @@ type LensMonitorFieldSnapshot struct {
 }
 
 // SendLensPointStateMessage sends a LensMonitorMessagePointState to the backend.
-func SendLensPointStateMessage(id int, snaps ...LensMonitorFieldSnapshot) {
-	sm := LensMonitorMessagePointState{
-		PointID: id,
-		TimeNS:  time.Since(lensClientStartTime).Nanoseconds(),
-		Stack:   captureLensMonitorStack(3), // skip Callers, captureLensMonitorStack, SendLensPointStateMessage
-	}
-
+func SendLensPointStateMessage(id uint32, snaps ...LensMonitorFieldSnapshot) {
+	// Filter nil snapshots first to get accurate count
+	validSnaps := make([]LensMonitorFieldSnapshot, 0, len(snaps))
 	for _, s := range snaps {
-		if s.Name == "nil" {
-			continue
+		if s.Name != "nil" {
+			validSnaps = append(validSnaps, s)
 		}
-		sf := LensMonitorField{
-			Name: s.Name,
-		}
-		buildLensMonitorField("", &sf, reflect.ValueOf(s.Val), 0, make(map[uintptr]string))
-		sm.Fields = append(sm.Fields, sf)
 	}
+	stack := captureLensMonitorStack(3) // skip runtime.Callers, captureLensMonitorStack, this func
 
-	postLensMonitorMessage(lensMonitorEndpointState, id, sm)
+	var buf bytes.Buffer
+	lensEncodeMessagePointState(&buf, id,
+		time.Since(lensClientStartTime).Nanoseconds(), stack, validSnaps)
+	postLensMonitorMessage(lensMonitorEndpointState, id, &buf)
 }
 
-func buildLensMonitorField(parentPath string, dst *LensMonitorField, v reflect.Value, depth int, visited map[uintptr]string) {
-	var valuePath string
-	if parentPath == "" {
-		valuePath = dst.Name
-	} else {
-		valuePath = parentPath + "." + dst.Name
-	}
-	// unwrap and handle nil interface{} if discovered
-	for v.IsValid() && (v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) {
-		if v.IsNil() {
-			// a nil interface: record its interface type, leave Value=nil
-			dst.Type = v.Type().String()
-			return
-		}
-		v = v.Elem() // otherwise unwrap one layer to the concrete value
-	}
-	if !v.IsValid() {
-		dst.Type = "invalid"
-		return
-	} else if depth >= lensMonitorFieldMaxRecurse {
-		dst.Type = v.Type().String()
-		dst.Value = "<max-depth>"
-		return
-	}
-
-	// handle explicit nils for remaining types
-	vKind := v.Kind()
-	vType := v.Type()
-	if vKind == reflect.Pointer || vKind == reflect.Map || vKind == reflect.Slice ||
-		vKind == reflect.Func || vKind == reflect.Chan || vKind == reflect.Interface {
-		if v.IsNil() {
-			dst.Type = vType.String()
-			return
-		}
-	}
-
-	// cycle detection: only for kinds that expose an addressable backing ptr
-	if vKind == reflect.Pointer || vKind == reflect.Map || vKind == reflect.Slice ||
-		vKind == reflect.Func || vKind == reflect.Chan {
-		addr := v.Pointer()
-		if name, ok := visited[addr]; ok {
-			dst.Type = vType.String()
-			dst.Value = fmt.Sprintf("<cycle:%s>", name)
-			return
-		}
-		visited[addr] = valuePath
-	}
-
-	dst.Type = vType.String()
-
-	// leaf / composite handling
-	switch v.Kind() {
-	case reflect.Bool:
-		dst.Value = v.Bool()
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		dst.Value = v.Int()
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		dst.Value = v.Uint()
-	case reflect.Float32, reflect.Float64:
-		// JSON doesn't support NaN or Inf, convert to strings
-		f := v.Float()
-		if math.IsNaN(f) {
-			dst.Value = floatValueNaN
-		} else if math.IsInf(f, 1) {
-			dst.Value = floatValuePInf
-		} else if math.IsInf(f, -1) {
-			dst.Value = floatValueNInf
-		} else {
-			dst.Value = f
-		}
-	case reflect.String:
-		dst.Value = limitLensMonitorStringSize(v.String())
-	case reflect.Slice, reflect.Array:
-		length := v.Len()
-		if length > lensMonitorFieldMaxLen {
-			length = lensMonitorFieldMaxLen
-		}
-
-		switch elemKind := vType.Elem().Kind(); elemKind {
-		// for basic‐typed slices/arrays, emit a single concise value
-		case reflect.Bool,
-			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-			reflect.Float32, reflect.Float64:
-			if elemKind == reflect.Uint8 {
-				if data := v.Bytes(); utf8.Valid(data) {
-					// treat this as a string
-					dst.Value = limitLensMonitorStringSize(string(data))
-					return
-				}
-			}
-
-			vals := make([]interface{}, length)
-			for i := 0; i < length; i++ {
-				val := v.Index(i).Interface()
-				// Handle NaN/Inf in float slices to prevent JSON marshal errors
-				if elemKind == reflect.Float32 || elemKind == reflect.Float64 {
-					if f, ok := val.(float64); ok {
-						if math.IsNaN(f) {
-							val = floatValueNaN
-						} else if math.IsInf(f, 1) {
-							val = floatValuePInf
-						} else if math.IsInf(f, -1) {
-							val = floatValueNInf
-						}
-					} else if f32, ok := val.(float32); ok {
-						f := float64(f32)
-						if math.IsNaN(f) {
-							val = floatValueNaN
-						} else if math.IsInf(f, 1) {
-							val = floatValuePInf
-						} else if math.IsInf(f, -1) {
-							val = floatValueNInf
-						}
-					}
-				}
-				vals[i] = val
-			}
-			dst.Value = vals
-		case reflect.String:
-			// Strings contain enough information that we are better to create children for each field
-			for i := 0; i < length; i++ {
-				child := LensMonitorField{
-					Name:  "[" + strconv.Itoa(i) + "]",
-					Type:  "string",
-					Value: limitLensMonitorStringSize(v.Index(i).String()),
-				}
-				dst.Children = append(dst.Children, child)
-			}
-		default:
-			// fallback: recurse into each element
-			for i := 0; i < length; i++ {
-				child := LensMonitorField{Name: "[" + strconv.Itoa(i) + "]"}
-				buildLensMonitorField(valuePath, &child, v.Index(i), depth+1, visited)
-				dst.Children = append(dst.Children, child)
-			}
-		}
-	case reflect.Map:
-		for _, k := range v.MapKeys() {
-			child := LensMonitorField{Name: fmt.Sprint(k.Interface())}
-			buildLensMonitorField(valuePath, &child, v.MapIndex(k), depth+1, visited)
-			dst.Children = append(dst.Children, child)
-		}
-	case reflect.Struct:
-		// if v itself is not addressable, copy it into an addressable temp
-		if !v.CanAddr() {
-			tmp := reflect.New(vType).Elem() // addressable zero of the same type
-			tmp.Set(v)                       // copy the real value in
-			v = tmp                          // now use tmp for all field work
-		}
-
-		for i := 0; i < v.NumField(); i++ {
-			sf := vType.Field(i)
-			child := LensMonitorField{Name: sf.Name}
-
-			fv := v.Field(i)
-			// if the field is unexported, break the barrier
-			if !fv.CanInterface() {
-				// get a pointer at the field's address and dereference
-				fv = reflect.NewAt(fv.Type(), unsafe.Pointer(fv.UnsafeAddr())).Elem()
-			}
-
-			buildLensMonitorField(valuePath, &child, fv, depth+1, visited)
-			dst.Children = append(dst.Children, child)
-		}
-		if len(dst.Children) == 0 { // if no children at all, fallback to fmt
-			dst.Value = fmt.Sprint(v.Interface())
-		}
-	case reflect.Func:
-		dst.Value = "<func>" // formatted function pointer is not valuable
-	case reflect.Chan:
-		dst.Value = "<chan>" // channel pointer is not useful
-	default:
-		// Fallback to fmt for anything else (complex, unsafe pointer)
-		dst.Value = fmt.Sprint(v.Interface())
+func lensEncodeMessagePointState(w io.Writer, id uint32, timestamp int64, stack []LensMonitorStackFrame, snaps []LensMonitorFieldSnapshot) {
+	lw := &lensMsgEncoder{w: w}
+	lw.writeVarint(uint64(id))
+	lw.writeInt64(timestamp)
+	lw.writeStackFrames(stack)
+	lw.writeVarint(uint64(len(snaps)))
+	for _, s := range snaps {
+		lw.streamField(s.Name, reflect.ValueOf(s.Val), 0, nil, "")
 	}
 }
 
@@ -290,24 +117,28 @@ func limitLensMonitorStringSize(s string) string {
 }
 
 // SendLensPointRecoveryMessage sends a LensMonitorMessagePointPanic to the backend.
-func SendLensPointRecoveryMessage(id int, r interface{}) {
+func SendLensPointRecoveryMessage(id uint32, r interface{}) {
 	if r == nil {
 		return
 	}
-	sm := LensMonitorMessagePointPanic{
-		PointID: id,
-		TimeNS:  time.Since(lensClientStartTime).Nanoseconds(),
-	}
-	sm.Message = fmt.Sprintf("%v", r)
 
-	postLensMonitorMessage(lensMonitorEndpointPanic, id, sm)
+	var buf bytes.Buffer
+	lensEncodeMessagePointPanic(&buf, id, time.Since(lensClientStartTime).Nanoseconds(), r)
+	postLensMonitorMessage(lensMonitorEndpointPanic, id, &buf)
+}
+
+func lensEncodeMessagePointPanic(w io.Writer, id uint32, timestamp int64, r interface{}) {
+	lw := &lensMsgEncoder{w: w}
+	lw.writeVarint(uint64(id))
+	lw.writeInt64(timestamp)
+	lw.writeString(fmt.Sprintf("%v", r))
 }
 
 func captureLensMonitorStack(skip int) []LensMonitorStackFrame {
-	pcs := make([]uintptr, 2048)
+	pcs := make([]uintptr, lensMonitorMaxStackFrames)
 	n := runtime.Callers(skip, pcs)
 	frames := runtime.CallersFrames(pcs[:n])
-	var stack []LensMonitorStackFrame
+	stack := make([]LensMonitorStackFrame, 0, n)
 	for {
 		f, more := frames.Next()
 		stack = append(stack, LensMonitorStackFrame{
@@ -322,16 +153,11 @@ func captureLensMonitorStack(skip int) []LensMonitorStackFrame {
 	return stack
 }
 
-// postLensMonitorMessage marshals payload and POSTs to endpoint, handling errors.
-func postLensMonitorMessage(endpoint string, id int, payload interface{}) {
-	data, err := json.Marshal(payload)
+// postLensMonitorMessage POSTs encoded binary data to endpoint, handling errors.
+func postLensMonitorMessage(endpoint string, id uint32, body io.Reader) {
+	r, err := lensHttpClient.Post(endpoint, "application/octet-stream", body)
 	if err != nil {
-		SendLensError(id, fmt.Errorf("marshal %T failed: %w", payload, err))
-		return
-	}
-	r, err := lensHttpClient.Post(endpoint, "application/json", bytes.NewReader(data))
-	if err != nil {
-		SendLensError(id, fmt.Errorf("POST %T failed: %w", payload, err))
+		SendLensError(id, fmt.Errorf("POST to %s failed: %w", endpoint, err))
 		return
 	}
 	defer func() { _ = r.Body.Close() }()
@@ -341,20 +167,17 @@ func postLensMonitorMessage(endpoint string, id int, payload interface{}) {
 }
 
 // SendLensError sends an Error notification to the backend.
-func SendLensError(id int, origErr error) {
+func SendLensError(id uint32, origErr error) {
 	if origErr == nil {
 		return
 	}
+	stack := captureLensMonitorStack(3) // skip runtime.Callers, captureLensMonitorStack, this func
 
-	data, err := json.Marshal(LensMonitorMessageError{
-		PointID: id,
-		Message: origErr.Error(),
-		Stack:   captureLensMonitorStack(3), // skip runtime.Callers, captureLensMonitorStack, this func
-	})
-	if err != nil {
-		fmt.Printf("marshal LensMonitorMessageError failed: %v, original error: %v\n", err, origErr)
-	}
-	resp, err := lensHttpClient.Post(lensMonitorEndpointError, "application/json", bytes.NewReader(data))
+	var buf bytes.Buffer
+	lensEncodeMessageError(&buf, id, origErr, stack)
+
+	// Note: cannot use postLensMonitorMessage to avoid infinite recursion on POST failure
+	resp, err := lensHttpClient.Post(lensMonitorEndpointError, "application/octet-stream", &buf)
 	if err != nil {
 		fmt.Printf("POST LensMonitorMessageError failed: %v, original error: %v\n", err, origErr)
 	} else {
@@ -363,4 +186,368 @@ func SendLensError(id int, origErr error) {
 			fmt.Printf("error endpoint returned status %d, original error: %v\n", resp.StatusCode, origErr)
 		}
 	}
+}
+
+func lensEncodeMessageError(w io.Writer, id uint32, origErr error, stack []LensMonitorStackFrame) {
+	lw := &lensMsgEncoder{w: w}
+	lw.writeVarint(uint64(id))
+	lw.writeString(origErr.Error())
+	lw.writeStackFrames(stack)
+}
+
+type lensMsgEncoder struct {
+	w   io.Writer
+	buf [10]byte // reused for all primitive writes
+}
+
+func (lw *lensMsgEncoder) writeStackFrames(frames []LensMonitorStackFrame) {
+	lw.writeVarint(uint64(len(frames)))
+	if len(frames) == 0 {
+		return
+	}
+
+	// Build string table for file paths and function names
+	stringTable := make([]string, 0, len(frames)*2)
+	stringIndex := make(map[string]uint32, len(frames)*2)
+	for i := range frames {
+		if _, ok := stringIndex[frames[i].File]; !ok {
+			stringIndex[frames[i].File] = uint32(len(stringTable))
+			stringTable = append(stringTable, frames[i].File)
+		}
+		if _, ok := stringIndex[frames[i].Function]; !ok {
+			stringIndex[frames[i].Function] = uint32(len(stringTable))
+			stringTable = append(stringTable, frames[i].Function)
+		}
+	}
+
+	// Write string table
+	lw.writeVarint(uint64(len(stringTable)))
+	for _, s := range stringTable {
+		lw.writeString(s)
+	}
+
+	// Write frames using string indices
+	for i := range frames {
+		lw.writeVarint(uint64(stringIndex[frames[i].File]))
+		lw.writeVarint(uint64(stringIndex[frames[i].Function]))
+		lw.writeVarint(uint64(frames[i].Line))
+	}
+}
+
+func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, visited map[uintptr]string, parentPath string) {
+	var valuePath string
+	if parentPath == "" {
+		valuePath = name
+	} else {
+		valuePath = parentPath + "." + name
+	}
+
+	// Write name first (always needed)
+	lw.writeString(name)
+
+	// Cycle detection for pointers BEFORE unwrapping
+	// This catches self-referential pointers like n.Next = n
+	if v.IsValid() && v.Kind() == reflect.Pointer && !v.IsNil() {
+		if visited == nil {
+			visited = make(map[uintptr]string)
+		}
+		addr := v.Pointer()
+		if cycleName, ok := visited[addr]; ok {
+			lw.writeString(v.Type().String())
+			lw.writeByte(lensTagString)
+			lw.writeString("<cycle:" + cycleName + ">")
+			return
+		}
+		visited[addr] = valuePath
+	}
+
+	// Unwrap interfaces and pointers
+	for v.IsValid() && (v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) {
+		if v.IsNil() {
+			lw.writeString(v.Type().String())
+			lw.writeByte(lensTagNil)
+			return
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		lw.writeString("invalid")
+		lw.writeByte(lensTagNil)
+		return
+	} else if depth >= lensMonitorFieldMaxRecurse {
+		lw.writeString(v.Type().String())
+		lw.writeByte(lensTagString)
+		lw.writeString("<max-depth>")
+		return
+	}
+
+	vKind := v.Kind()
+	vType := v.Type()
+
+	// Handle nil for pointer-like types
+	if vKind == reflect.Pointer || vKind == reflect.Map || vKind == reflect.Slice ||
+		vKind == reflect.Func || vKind == reflect.Chan || vKind == reflect.Interface {
+		if v.IsNil() {
+			lw.writeString(vType.String())
+			lw.writeByte(lensTagNil)
+			return
+		}
+	}
+
+	// Cycle detection
+	if vKind == reflect.Pointer || vKind == reflect.Map || vKind == reflect.Slice ||
+		vKind == reflect.Func || vKind == reflect.Chan {
+		if visited == nil {
+			visited = make(map[uintptr]string)
+		}
+		addr := v.Pointer()
+		if cycleName, ok := visited[addr]; ok {
+			lw.writeString(vType.String())
+			lw.writeByte(lensTagString)
+			lw.writeString("<cycle:" + cycleName + ">")
+			return
+		}
+		visited[addr] = valuePath
+	}
+
+	lw.writeString(vType.String())
+
+	switch vKind {
+	case reflect.Bool:
+		lw.writeByte(lensTagBool)
+		if v.Bool() {
+			lw.writeByte(1)
+		} else {
+			lw.writeByte(0)
+		}
+
+	case reflect.Int8, reflect.Int16, reflect.Int32:
+		lw.writeByte(lensTagInt32)
+		lw.writeSignedVarint(v.Int())
+
+	case reflect.Int, reflect.Int64:
+		lw.writeByte(lensTagInt64)
+		lw.writeSignedVarint(v.Int())
+
+	case reflect.Uint8, reflect.Uint16, reflect.Uint32:
+		lw.writeByte(lensTagUint32)
+		lw.writeVarint(v.Uint())
+
+	case reflect.Uint, reflect.Uint64, reflect.Uintptr:
+		lw.writeByte(lensTagUint64)
+		lw.writeVarint(v.Uint())
+
+	case reflect.Float32:
+		lw.writeByte(lensTagFloat32)
+		lw.writeFloat32(float32(v.Float()))
+
+	case reflect.Float64:
+		lw.writeByte(lensTagFloat64)
+		lw.writeFloat64(v.Float())
+
+	case reflect.Complex64, reflect.Complex128:
+		lw.writeByte(lensTagComplex128)
+		c := v.Complex()
+		lw.writeFloat64(real(c))
+		lw.writeFloat64(imag(c))
+
+	case reflect.String:
+		lw.writeByte(lensTagString)
+		lw.writeString(limitLensMonitorStringSize(v.String()))
+
+	case reflect.Slice, reflect.Array:
+		lw.streamValueSlice(v, vType, depth, visited, valuePath)
+
+	case reflect.Map:
+		lw.writeByte(lensTagMap)
+		keys := v.MapKeys()
+		lw.writeVarint(uint64(len(keys)))
+		for _, k := range keys {
+			lw.streamField(fmt.Sprint(k.Interface()), v.MapIndex(k), depth+1, visited, valuePath)
+		}
+
+	case reflect.Struct:
+		// Make addressable if needed for unexported field access
+		if !v.CanAddr() {
+			tmp := reflect.New(vType).Elem()
+			tmp.Set(v)
+			v = tmp
+		}
+		numFields := v.NumField()
+		lw.writeByte(lensTagStruct)
+		lw.writeVarint(uint64(numFields))
+		for i := 0; i < numFields; i++ {
+			sf := vType.Field(i)
+			fv := v.Field(i)
+			if !fv.CanInterface() {
+				fv = reflect.NewAt(fv.Type(), unsafe.Pointer(fv.UnsafeAddr())).Elem()
+			}
+			lw.streamField(sf.Name, fv, depth+1, visited, valuePath)
+		}
+
+	case reflect.Func:
+		lw.writeByte(lensTagString)
+		lw.writeString("<func>")
+
+	case reflect.Chan:
+		lw.writeByte(lensTagString)
+		lw.writeString("<chan>")
+
+	default:
+		lw.writeByte(lensTagString)
+		lw.writeString(fmt.Sprint(v.Interface()))
+	}
+}
+
+// streamValueSlice handles slice/array encoding with optimized paths for primitive element types.
+func (lw *lensMsgEncoder) streamValueSlice(v reflect.Value, vType reflect.Type, depth int, visited map[uintptr]string, valuePath string) {
+	length := v.Len()
+	if length > lensMonitorFieldMaxLen {
+		length = lensMonitorFieldMaxLen
+	}
+
+	elemKind := vType.Elem().Kind()
+
+	switch elemKind {
+	case reflect.Bool:
+		vals := make([]bool, length)
+		for i := 0; i < length; i++ {
+			vals[i] = v.Index(i).Bool()
+		}
+		lw.writeByte(lensTagBoolSlice)
+		lw.writeVarint(uint64(len(vals)))
+		for i := 0; i < len(vals); i += 8 {
+			var b byte
+			for j := 0; j < 8 && i+j < len(vals); j++ {
+				if vals[i+j] {
+					b |= 1 << j
+				}
+			}
+			lw.writeByte(b)
+		}
+
+	case reflect.Int8, reflect.Int16, reflect.Int32:
+		lw.writeByte(lensTagInt32Slice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeSignedVarint(v.Index(i).Int())
+		}
+
+	case reflect.Int, reflect.Int64:
+		lw.writeByte(lensTagInt64Slice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeSignedVarint(v.Index(i).Int())
+		}
+
+	case reflect.Uint8:
+		var data []byte
+		if v.Kind() == reflect.Slice {
+			data = v.Bytes()
+			if len(data) > lensMonitorFieldMaxLen {
+				data = data[:lensMonitorFieldMaxLen]
+			}
+		} else {
+			data = make([]byte, length)
+			for i := 0; i < length; i++ {
+				data[i] = byte(v.Index(i).Uint())
+			}
+		}
+		if utf8.Valid(data) {
+			lw.writeByte(lensTagString)
+			lw.writeString(limitLensMonitorStringSize(string(data)))
+		} else {
+			lw.writeByte(lensTagBytes)
+			lw.writeVarint(uint64(len(data)))
+			_, _ = lw.w.Write(data)
+		}
+
+	case reflect.Uint16, reflect.Uint32:
+		lw.writeByte(lensTagUint32Slice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeVarint(v.Index(i).Uint())
+		}
+
+	case reflect.Uint, reflect.Uint64, reflect.Uintptr:
+		lw.writeByte(lensTagUint64Slice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeVarint(v.Index(i).Uint())
+		}
+
+	case reflect.Float32:
+		lw.writeByte(lensTagFloat32Slice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeFloat32(float32(v.Index(i).Float()))
+		}
+
+	case reflect.Float64:
+		lw.writeByte(lensTagFloat64Slice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeFloat64(v.Index(i).Float())
+		}
+
+	case reflect.String:
+		lw.writeByte(lensTagStringSlice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.writeString(limitLensMonitorStringSize(v.Index(i).String()))
+		}
+
+	default:
+		lw.writeByte(lensTagSlice)
+		lw.writeVarint(uint64(length))
+		for i := 0; i < length; i++ {
+			lw.streamField("["+strconv.Itoa(i)+"]", v.Index(i), depth+1, visited, valuePath)
+		}
+	}
+}
+
+func (lw *lensMsgEncoder) writeByte(b byte) {
+	lw.buf[0] = b
+	_, _ = lw.w.Write(lw.buf[:1])
+}
+
+func (lw *lensMsgEncoder) writeInt64(v int64) {
+	b := lw.buf[:8]
+	binary.LittleEndian.PutUint64(b, uint64(v))
+	_, _ = lw.w.Write(b)
+}
+
+// writeVarint writes a uint64 using variable-length encoding (7 bits per byte, high bit = continuation)
+func (lw *lensMsgEncoder) writeVarint(v uint64) {
+	var i int
+	for v >= 0x80 {
+		lw.buf[i] = byte(v) | 0x80
+		v >>= 7
+		i++
+	}
+	lw.buf[i] = byte(v)
+	_, _ = lw.w.Write(lw.buf[:i+1])
+}
+
+// writeSignedVarint writes a signed int64 using zigzag encoding then varint.
+func (lw *lensMsgEncoder) writeSignedVarint(v int64) {
+	// Zigzag encode: map signed to unsigned (0, -1, 1, -2, 2, ... -> 0, 1, 2, 3, 4, ...)
+	lw.writeVarint(uint64(v<<1) ^ uint64(v>>63))
+}
+
+func (lw *lensMsgEncoder) writeFloat32(v float32) {
+	b := lw.buf[:4]
+	binary.LittleEndian.PutUint32(b, math.Float32bits(v))
+	_, _ = lw.w.Write(b)
+}
+
+func (lw *lensMsgEncoder) writeFloat64(v float64) {
+	b := lw.buf[:8]
+	binary.LittleEndian.PutUint64(b, math.Float64bits(v))
+	_, _ = lw.w.Write(b)
+}
+
+func (lw *lensMsgEncoder) writeString(s string) {
+	lw.writeVarint(uint64(len(s)))
+	_, _ = io.WriteString(lw.w, s)
 }

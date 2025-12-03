@@ -50,18 +50,16 @@ func freePort(t *testing.T) int {
 }
 
 func TestASTEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skip in short mode")
-	}
+	t.Parallel()
 
 	// singleReturnInjector helps implement our test case function to match other injection functions
-	singleReturnInjectorFactory := func(f func(m *ASTModifier, fn *Function) (int, error)) func(m *ASTModifier, fn *Function) ([]int, error) {
-		return func(m *ASTModifier, fn *Function) ([]int, error) {
+	singleReturnInjectorFactory := func(f func(m *ASTModifier, fn *Function) (uint32, error)) func(m *ASTModifier, fn *Function) ([]uint32, error) {
+		return func(m *ASTModifier, fn *Function) ([]uint32, error) {
 			id, err := f(m, fn)
 			if err != nil {
 				return nil, err
 			}
-			return []int{id}, nil
+			return []uint32{id}, nil
 		}
 	}
 
@@ -69,7 +67,7 @@ func TestASTEndToEnd(t *testing.T) {
 		name                string
 		fnName              string
 		src                 string
-		inject              func(m *ASTModifier, fn *Function) ([]int, error)
+		inject              func(m *ASTModifier, fn *Function) ([]uint32, error)
 		expectedPoints      int
 		expectedStatePoints int
 		expectedPanicPoints int
@@ -82,9 +80,9 @@ func TestASTEndToEnd(t *testing.T) {
 			name: "basic", // no function injection, only direct client call
 			src: `package main
 func main() {
-	SendLensPointMessage(-1)
+	SendLensPointMessage(1)
 }`,
-			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]uint32, error) {
 				return nil, nil // no-op
 			},
 			expectedPoints: 1,
@@ -139,13 +137,13 @@ func main(){ TargetFinish() }`,
 			src: `package main
 func TargetBoth() {}
 func main(){ TargetBoth() }`,
-			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]uint32, error) {
 				if id1, err := m.InjectFuncPointEntry(fn); err != nil {
 					return nil, err
 				} else if id2, err := m.InjectFuncPointFinish(fn); err != nil {
 					return nil, err
 				} else {
-					return []int{id1, id2}, nil
+					return []uint32{id1, id2}, nil
 				}
 			},
 			expectedPoints: 2,
@@ -418,7 +416,7 @@ func main() {
 				f := p.Fields[0]
 				assert.Equal(t, "ret0", f.Name)
 				assert.Equal(t, "[]int", f.Type)
-				assert.Equal(t, []interface{}{float64(1), float64(2), float64(3)}, f.Value)
+				assert.Equal(t, []int64{1, 2, 3}, f.Value)
 			},
 		},
 		{
@@ -568,7 +566,7 @@ func main() {
 			src: `package main
 func Generic[T any](v T) T { return v }
 func main() { _ = Generic(1) }`,
-			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]uint32, error) {
 				id1, err := m.InjectFuncPointEntry(fn)
 				if err != nil {
 					return nil, err
@@ -581,7 +579,7 @@ func main() { _ = Generic(1) }`,
 				if err != nil {
 					return nil, err
 				}
-				return append([]int{id1, id2}, ids...), nil
+				return append([]uint32{id1, id2}, ids...), nil
 			},
 			expectedPoints:      2,
 			expectedStatePoints: 1,
@@ -593,7 +591,7 @@ func main() { _ = Generic(1) }`,
 type Box[T any] struct{ v T }
 func (b Box[T]) Get() T { return b.v }
 func main() { b := Box[int]{v: 2}; _ = b.Get() }`,
-			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]uint32, error) {
 				id1, err := m.InjectFuncPointEntry(fn)
 				if err != nil {
 					return nil, err
@@ -606,7 +604,7 @@ func main() { b := Box[int]{v: 2}; _ = b.Get() }`,
 				if err != nil {
 					return nil, err
 				}
-				return append([]int{id1, id2}, ids...), nil
+				return append([]uint32{id1, id2}, ids...), nil
 			},
 			expectedPoints:      2,
 			expectedStatePoints: 1,
@@ -619,7 +617,7 @@ func main() { b := Box[int]{v: 2}; _ = b.Get() }`,
 type Box[T any] struct{ v T }
 func (b *Box[T]) Set(v T) T { old := b.v; b.v = v; return old }
 func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
-			inject: func(m *ASTModifier, fn *Function) ([]int, error) {
+			inject: func(m *ASTModifier, fn *Function) ([]uint32, error) {
 				id1, err := m.InjectFuncPointEntry(fn)
 				if err != nil {
 					return nil, err
@@ -632,7 +630,7 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 				if err != nil {
 					return nil, err
 				}
-				return append([]int{id1, id2}, ids...), nil
+				return append([]uint32{id1, id2}, ids...), nil
 			},
 			expectedPoints:      2,
 			expectedStatePoints: 1,
@@ -641,9 +639,11 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 	}
 
 	for _, tc := range testCases {
-		tc := tc // capture for parallel run
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			if testing.Short() {
+				t.Skip("skip in short mode")
+			}
+
 			tmp := t.TempDir()
 
 			// write out test case application into the directory
@@ -655,10 +655,12 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 
 			// choose an unused TCP port
 			port := freePort(t)
+			const maxRecurse = 5
+			const maxFieldLen = 256
 
 			// inject the client and test injection points
 			mod := &ASTModifier{}
-			err = mod.InjectASTClient(tmp, port, 5, 256)
+			err = mod.InjectASTClient(tmp, port, maxRecurse, maxFieldLen)
 			require.NoError(t, err)
 			ident := tc.fnIdent
 			if ident == "" {
@@ -674,7 +676,7 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 			require.NoError(t, mod.Commit())
 			// start the monitoring server
 			handler := &captureHandler{}
-			srv, err := astExecServerStart("127.0.0.1", port, handler)
+			srv, err := astExecServerStart("127.0.0.1", port, handler, maxFieldLen)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = srv.Stop(t.Context()) })
 
@@ -765,7 +767,6 @@ func TestExtensionPointEndToEnd(t *testing.T) {
 		t.Skip("skip in short mode")
 	}
 
-	t.Parallel()
 	tmp := t.TempDir()
 
 	// Source with a helper function to monitor via extension points
@@ -793,10 +794,12 @@ func main() {
 	require.NoError(t, err)
 
 	port := freePort(t)
+	const maxRecurse = 5
+	const maxFieldLen = 256
 
 	// Inject AST client
 	mod := &ASTModifier{}
-	err = mod.InjectASTClient(tmp, port, 5, 256)
+	err = mod.InjectASTClient(tmp, port, maxRecurse, maxFieldLen)
 	require.NoError(t, err)
 
 	// Inject regular monitoring on Target function
@@ -821,14 +824,14 @@ func main() {
 
 	// Configure extension points mapping
 	extensionKey := "test:helper:call"
-	extensionPoints := make(map[int]*string)
+	extensionPoints := make(map[uint32]*string)
 	for _, pointId := range helperPointIds {
 		extensionPoints[pointId] = &extensionKey
 	}
 
 	// Configure regular project points mapping
 	targetKey := "main:Target"
-	projectPoints := make(map[int]*string)
+	projectPoints := make(map[uint32]*string)
 	for _, pointId := range targetPointIds {
 		projectPoints[pointId] = &targetKey
 	}
@@ -836,16 +839,16 @@ func main() {
 	require.NoError(t, mod.Commit())
 
 	// Start monitoring server with testMonitor to route messages
-	srv, err := astExecServerStart("127.0.0.1", port, nil)
+	srv, err := astExecServerStart("127.0.0.1", port, nil, maxFieldLen)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Stop(t.Context()) })
 
 	monitor := newTestMonitor(nil, "", tmp,
-		projectPoints,         // projectStatePointIdToIdent
-		make(map[int]*string), // projectPanicPointIdToIdent
-		make(map[int]*string), // moduleEntryPointIdToIdent
-		make(map[int]*string), // modulePanicPointIdToIdent
-		extensionPoints,       // extensionStatePointIdToIdent
+		projectPoints,            // projectStatePointIdToIdent
+		make(map[uint32]*string), // projectPanicPointIdToIdent
+		make(map[uint32]*string), // moduleEntryPointIdToIdent
+		make(map[uint32]*string), // modulePanicPointIdToIdent
+		extensionPoints,          // extensionStatePointIdToIdent
 	)
 	err = srv.SetPointHandler(monitor)
 	require.NoError(t, err)

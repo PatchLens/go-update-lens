@@ -1559,13 +1559,13 @@ func ProcessData() {
 			require.Len(t, pointMap, tc.expectedPoints)
 
 			// Verify point IDs are sequential
-			pointIDs := make([]int, 0, len(pointMap))
+			pointIDs := make([]uint32, 0, len(pointMap))
 			for id := range pointMap {
 				pointIDs = append(pointIDs, id)
 			}
 			slices.Sort(pointIDs)
 			for i, id := range pointIDs {
-				assert.Equal(t, i, id)
+				assert.Equal(t, uint32(i+1), id) // point IDs start at 1
 			}
 
 			require.NoError(t, modifier.CommitFile(filePath))
@@ -1682,7 +1682,7 @@ func ProcessData(path, cmd string) {
 	require.NoError(t, err)
 	require.Len(t, pointMap1, 1)
 
-	var fsOpenPointID int
+	var fsOpenPointID uint32
 	for id := range pointMap1 {
 		fsOpenPointID = id
 	}
@@ -1704,7 +1704,7 @@ func ProcessData(path, cmd string) {
 	require.NoError(t, err)
 	require.Len(t, pointMap2, 1)
 
-	var execCmdPointID int
+	var execCmdPointID uint32
 	for id := range pointMap2 {
 		execCmdPointID = id
 	}
@@ -1739,7 +1739,7 @@ func ProcessData(path, cmd string) {
 
 	// Count monitoring calls and verify both are present
 	monitoringCalls := 0
-	foundPointIDs := make(map[int]bool)
+	foundPointIDs := make(map[uint32]bool)
 	ast.Inspect(funcDecl, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == sendLensPointStateMessageFunc {
@@ -1747,8 +1747,8 @@ func ProcessData(path, cmd string) {
 				// Extract point ID from first argument
 				if len(call.Args) > 0 {
 					if lit, ok := call.Args[0].(*ast.BasicLit); ok {
-						if id, err := strconv.Atoi(lit.Value); err == nil {
-							foundPointIDs[id] = true
+						if id, err := strconv.ParseUint(lit.Value, 10, 32); err == nil {
+							foundPointIDs[uint32(id)] = true
 						}
 					}
 				}
@@ -2135,8 +2135,8 @@ func ProcessData() int {
 		require.NoError(t, err)
 		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "next"))
 		code := string(modifiedSrc)
-		assert.Contains(t, code, "lenSyntheticArg0_0 := next()")
-		assert.Contains(t, code, "first(lenSyntheticArg0_0)")
+		assert.Contains(t, code, "lenSyntheticArg1_0 := next()")
+		assert.Contains(t, code, "first(lenSyntheticArg1_0)")
 	})
 
 	t.Run("for_post_side_effect_single_eval", func(t *testing.T) {
@@ -2186,7 +2186,7 @@ func Process() {
 		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "next"))
 		code := string(modifiedSrc)
 		assert.Contains(t, code, "for i := 0; i < 2; func() {")
-		assert.Contains(t, code, "helper(lenSyntheticArg0_0)")
+		assert.Contains(t, code, "helper(lenSyntheticArg1_0)")
 	})
 
 	t.Run("multiple_args_side_effects", func(t *testing.T) {
@@ -2234,10 +2234,10 @@ func ProcessData() int {
 		// Each next() should only be called once and stored in separate temp variables
 		assert.Equal(t, 3, countFunctionCalls(t, modifiedSrc, "next"))
 		code := string(modifiedSrc)
-		assert.Contains(t, code, "lenSyntheticArg0_0 := next()")
-		assert.Contains(t, code, "lenSyntheticArg0_1 := next()")
-		assert.Contains(t, code, "lenSyntheticArg0_2 := next()")
-		assert.Contains(t, code, "addThree(lenSyntheticArg0_0, lenSyntheticArg0_1, lenSyntheticArg0_2)")
+		assert.Contains(t, code, "lenSyntheticArg1_0 := next()")
+		assert.Contains(t, code, "lenSyntheticArg1_1 := next()")
+		assert.Contains(t, code, "lenSyntheticArg1_2 := next()")
+		assert.Contains(t, code, "addThree(lenSyntheticArg1_0, lenSyntheticArg1_1, lenSyntheticArg1_2)")
 	})
 
 	t.Run("variadic_side_effects", func(t *testing.T) {
@@ -2292,10 +2292,10 @@ func ProcessData() {
 		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "getFormat"))
 		assert.Equal(t, 2, countFunctionCalls(t, modifiedSrc, "getArg"))
 		code := string(modifiedSrc)
-		assert.Contains(t, code, "lenSyntheticArg0_0 := getFormat()")
-		assert.Contains(t, code, "lenSyntheticArg0_1 := getArg()")
-		assert.Contains(t, code, "lenSyntheticArg0_2 := getArg()")
-		assert.Contains(t, code, "fmt.Printf(lenSyntheticArg0_0, lenSyntheticArg0_1, lenSyntheticArg0_2)")
+		assert.Contains(t, code, "lenSyntheticArg1_0 := getFormat()")
+		assert.Contains(t, code, "lenSyntheticArg1_1 := getArg()")
+		assert.Contains(t, code, "lenSyntheticArg1_2 := getArg()")
+		assert.Contains(t, code, "fmt.Printf(lenSyntheticArg1_0, lenSyntheticArg1_1, lenSyntheticArg1_2)")
 	})
 
 	t.Run("method_chaining_side_effects", func(t *testing.T) {
@@ -2361,10 +2361,10 @@ func ProcessData() int {
 		assert.Equal(t, 1, countFunctionCalls(t, modifiedSrc, "getValue"))
 		code := string(modifiedSrc)
 		// Receiver (getBuilder()) should be evaluated once
-		assert.Contains(t, code, "lenSyntheticRecv0 := getBuilder()")
+		assert.Contains(t, code, "lenSyntheticRecv1 := getBuilder()")
 		// Argument (getValue()) should be evaluated once
-		assert.Contains(t, code, "lenSyntheticArg0_0 := getValue()")
-		assert.Contains(t, code, "lenSyntheticRecv0.Add(lenSyntheticArg0_0)")
+		assert.Contains(t, code, "lenSyntheticArg1_0 := getValue()")
+		assert.Contains(t, code, "lenSyntheticRecv1.Add(lenSyntheticArg1_0)")
 	})
 }
 
@@ -2536,8 +2536,8 @@ func Process() {
 
 				assert.Equal(t, 1, countFunctionCalls(t, src, "makeStruct"))
 				code := string(src)
-				assert.Contains(t, code, "lenSyntheticRecv0 := makeStruct()")
-				assert.Contains(t, code, "lenSyntheticRecv0.DoWork()")
+				assert.Contains(t, code, "lenSyntheticRecv1 := makeStruct()")
+				assert.Contains(t, code, "lenSyntheticRecv1.DoWork()")
 			},
 		},
 	}
@@ -2577,7 +2577,7 @@ func Process() {
 
 			// If synthetic receiver expected, verify assignment was created
 			if tc.expectSynthetic {
-				assert.Contains(t, modifiedStr, syntheticFieldNamePrefixReceiver+"0 := ")
+				assert.Contains(t, modifiedStr, syntheticFieldNamePrefixReceiver+"1 := ")
 			}
 
 			fset := token.NewFileSet()

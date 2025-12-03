@@ -2,6 +2,7 @@ package lens
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -30,7 +31,7 @@ func (m *mockPointHandler) HandleFuncPointPanic(LensMonitorMessagePointPanic) {
 
 func newASTMux(h *mockPointHandler) *http.ServeMux {
 	var iface astPointHandler = h
-	srv := &astServer{}
+	srv := &astServer{maxFieldLen: 1024}
 	srv.pointHandler.Store(&iface)
 	mux := http.NewServeMux()
 	mux.HandleFunc(lensMonitorEndpointPathError, srv.handleEventError)
@@ -53,15 +54,18 @@ func TestASTServerHandlePoint(t *testing.T) {
 	mux := newASTMux(handler)
 
 	t.Run("valid", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPoint, bytes.NewBufferString(`{"id":1}`))
+		var buf bytes.Buffer
+		lensEncodeMessagePoint(&buf, 1, 12345, []LensMonitorStackFrame{})
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPoint, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, int32(1), atomic.LoadInt32(&handler.pointCalls))
 	})
 
-	t.Run("invalid_json", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPoint, bytes.NewBufferString("{"))
+	t.Run("invalid_binary", func(t *testing.T) {
+		// Send truncated/invalid binary data
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPoint, bytes.NewBufferString("\x01"))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -86,15 +90,18 @@ func TestASTServerHandlePointState(t *testing.T) {
 	mux := newASTMux(handler)
 
 	t.Run("valid", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathState, bytes.NewBufferString(`{"id":1}`))
+		var buf bytes.Buffer
+		lensEncodeMessagePointState(&buf, 1, 12345, []LensMonitorStackFrame{}, nil)
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathState, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, int32(1), atomic.LoadInt32(&handler.stateCalls))
 	})
 
-	t.Run("invalid_json", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathState, bytes.NewBufferString("{"))
+	t.Run("invalid_binary", func(t *testing.T) {
+		// Send truncated/invalid binary data
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathState, bytes.NewBufferString("\x01"))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -119,15 +126,18 @@ func TestASTServerHandlePointPanic(t *testing.T) {
 	mux := newASTMux(handler)
 
 	t.Run("valid", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPanic, bytes.NewBufferString(`{"id":1}`))
+		var buf bytes.Buffer
+		lensEncodeMessagePointPanic(&buf, 1, 12345, "test panic")
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPanic, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, int32(1), atomic.LoadInt32(&handler.panicCalls))
 	})
 
-	t.Run("invalid_json", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPanic, bytes.NewBufferString("{"))
+	t.Run("invalid_binary", func(t *testing.T) {
+		// Send truncated/invalid binary data
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPanic, bytes.NewBufferString("\x01"))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -152,14 +162,17 @@ func TestASTServerHandleEventError(t *testing.T) {
 	mux := newASTMux(handler)
 
 	t.Run("valid", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathError, bytes.NewBufferString(`{"id":1,"msg":"foo"}`))
+		var buf bytes.Buffer
+		lensEncodeMessageError(&buf, 1, errors.New("test error"), []LensMonitorStackFrame{})
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathError, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("invalid_json", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathError, bytes.NewBufferString("{"))
+	t.Run("invalid_binary", func(t *testing.T) {
+		// Send truncated/invalid binary data
+		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathError, bytes.NewBufferString("\x01"))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusBadRequest, w.Code)

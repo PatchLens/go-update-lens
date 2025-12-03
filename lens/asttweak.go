@@ -49,7 +49,7 @@ var astFileLock = newDefaultStripedMutex()
 // ASTModifier provides utilities for modifying Go AST.
 // Extensions can use this to inject custom monitoring at specific points in code.
 type ASTModifier struct {
-	currPointId    atomic.Int32
+	currPointId    atomic.Uint32
 	cleanupLock    sync.Mutex
 	cleanupActions []func() error
 	fileNodeMap    sync.Map
@@ -332,37 +332,42 @@ func (m *ASTModifier) backupOrigFile(filepath string) error {
 	return nil
 }
 
-func (m *ASTModifier) nextPointId() (int, error) {
-	var val int32
+func (m *ASTModifier) nextPointId() (uint32, error) {
+	var val uint32
 	for {
 		val = m.currPointId.Load()
-		if val < 0 {
+		if val == 0 { // 0 is an invalid point id, attempt to skip it
+			if m.currPointId.CompareAndSwap(0, 2) {
+				return 1, nil
+			}
+			continue // retry
+		} else if nextVal := val + 1; nextVal == 0 {
 			return 0, errors.New("point id overflow")
-		} else if m.currPointId.CompareAndSwap(val, val+1) {
+		} else if m.currPointId.CompareAndSwap(val, nextVal) {
 			break
 		}
 	}
-	return int(val), nil
+	return val, nil
 }
 
 // injectPoint bundles the repetitive “backup → parse → mutate → write” sequence.
 // `modify` gets the function body and the freshly allocated pointID and must mutate the AST in-place.
-func (m *ASTModifier) injectPoint(filePath, pkg, funcIdent string, modify func(body *ast.BlockStmt, pointID int)) (int, error) {
+func (m *ASTModifier) injectPoint(filePath, pkg, funcIdent string, modify func(body *ast.BlockStmt, pointID uint32)) (uint32, error) {
 	lock := astFileLock.Lock(filePath)
 	defer lock.Unlock()
 
 	_, fileNode, err := m.loadParsedFileNode(filePath)
 	if err != nil {
-		return -1, err
+		return 0, err
 	}
 	target := findFuncDecl(fileNode, pkg, funcIdent)
 	if target == nil || target.Body == nil {
-		return -1, fmt.Errorf("function %s not found in %s", funcIdent, filePath)
+		return 0, fmt.Errorf("function %s not found in %s", funcIdent, filePath)
 	}
 
 	pointID, err := m.nextPointId()
 	if err != nil {
-		return -1, err
+		return 0, err
 	}
 	modify(target.Body, pointID)
 
@@ -384,8 +389,8 @@ func hasPatchlensMarker(funcDecl *ast.FuncDecl, marker string) bool {
 // InjectFuncPointPanic inserts a defer recovery at the start of the function. This recovery will invoke
 // the client to communicate the state, but then re-panic.  Because this is the first defer statement,
 // it will trigger only if no other recovery exists.
-func (m *ASTModifier) InjectFuncPointPanic(f *Function) (int, error) {
-	return m.injectPoint(f.FilePath, f.PackageName, f.FunctionIdent, func(body *ast.BlockStmt, pointID int) {
+func (m *ASTModifier) InjectFuncPointPanic(f *Function) (uint32, error) {
+	return m.injectPoint(f.FilePath, f.PackageName, f.FunctionIdent, func(body *ast.BlockStmt, pointID uint32) {
 		// build:
 		//   defer func() {
 		//     if r := recover(); r != nil {
@@ -415,7 +420,7 @@ func (m *ASTModifier) InjectFuncPointPanic(f *Function) (int, error) {
 								&ast.ExprStmt{X: &ast.CallExpr{
 									Fun: ast.NewIdent("SendLensPointRecoveryMessage"),
 									Args: []ast.Expr{
-										&ast.BasicLit{Kind: token.INT, Value: strconv.Itoa(pointID)},
+										&ast.BasicLit{Kind: token.INT, Value: strconv.FormatUint(uint64(pointID), 10)},
 										ast.NewIdent("r"),
 									},
 								}},
@@ -436,7 +441,7 @@ func (m *ASTModifier) InjectFuncPointPanic(f *Function) (int, error) {
 
 // InjectFuncPointReturnStates inserts a state point right before the return points within the function. If the return
 // line has a function call, the return point will be inserted after the call.
-func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
+func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]uint32, error) {
 	const modificationMarker = "patchlens:return-states"
 	lock := astFileLock.Lock(fn.FilePath)
 	defer lock.Unlock()
@@ -449,7 +454,7 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 	if funcDecl == nil || funcDecl.Body == nil {
 		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionName, fn.FilePath)
 	} else if hasPatchlensMarker(funcDecl, modificationMarker) {
-		return []int{}, nil // already inserted
+		return []uint32{}, nil // already inserted
 	}
 	var funcResultTypes []ast.Expr
 	var funcResultNames []string
@@ -475,7 +480,7 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 	info := buildTypesInfo(fset, fileNode) // may return nil
 
 	// Walk the AST, rewriting every *ast.ReturnStmt in-place.
-	var pointIDs []int
+	var pointIDs []uint32
 	var foundExplicitReturn bool
 	// helper function that recursively rewrites a *ast.BlockStmt in-place
 	var buf bytes.Buffer
@@ -557,7 +562,7 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 		if err != nil {
 			return nil, err
 		}
-		pointIDs = []int{pointID}
+		pointIDs = []uint32{pointID}
 
 		decls := visibleDeclsBefore(funcDecl, funcDecl.Body.End()-1)
 		stmt, err := buildImplicitReturnInstrumentation(&buf, pointIDs[0], decls)
@@ -597,7 +602,7 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]int, error) {
 // to reduce memory overhead and focus on the specific data being passed to the function.
 //
 // Returns a map from point ID to caller-provided metadata for all injection points.
-func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) (metadata any, inject bool)) (map[int]any, error) {
+func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(*ast.CallExpr) (metadata any, inject bool)) (map[uint32]any, error) {
 	lock := astFileLock.Lock(fn.FilePath)
 	defer lock.Unlock()
 
@@ -623,7 +628,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		}
 	}
 
-	pointMap := make(map[int]any)
+	pointMap := make(map[uint32]any)
 	var buf bytes.Buffer
 
 	// Helper to find a matching call in a node, returns the call and its metadata if found
@@ -859,7 +864,7 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 // Note: In Go's AST, variadic arguments with ... (e.g., append(slice, elements...)) are represented with
 // CallExpr.Ellipsis field set to the position of the ... token, not as an ast.Ellipsis node in the Args.
 // The arguments themselves are just regular expressions, so we capture them as-is.
-func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID int, call *ast.CallExpr, filePackageNames map[string]bool) ([]ast.Stmt, error) {
+func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID uint32, call *ast.CallExpr, filePackageNames map[string]bool) ([]ast.Stmt, error) {
 	// Build snapshots for receiver (if any) and the call's arguments
 	snaps := make([]ast.Expr, 0, len(call.Args)+1)
 	stmts := make([]ast.Stmt, 0, len(call.Args)+2)
@@ -1075,7 +1080,7 @@ func visibleDeclsBefore(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
 
 // buildReturnInstrumentation inserts instrumentation around an explicit return. All nodes that originate
 // in the project source are first cloned with their positions stripped, so the generated block is position-clean.
-func buildReturnInstrumentation(buf *bytes.Buffer, ret *ast.ReturnStmt, pointID int, fn *Function,
+func buildReturnInstrumentation(buf *bytes.Buffer, ret *ast.ReturnStmt, pointID uint32, fn *Function,
 	decls []declInfo, funcResultTypes []ast.Expr, info *types.Info, funcResultNames []string) (*ast.BlockStmt, error) {
 	// helper to make identifiers
 	ident := func(name string) *ast.Ident { return ast.NewIdent(name) }
@@ -1300,10 +1305,10 @@ func cloneExprNoPos(buf *bytes.Buffer, e ast.Node) (ast.Expr, error) {
 	return parser.ParseExprFrom(token.NewFileSet(), "", buf.Bytes(), 0)
 }
 
-func makeSendLensPointStateMessageStmt(buf *bytes.Buffer, pointID int, snaps []ast.Expr) (ast.Stmt, error) {
+func makeSendLensPointStateMessageStmt(buf *bytes.Buffer, pointID uint32, snaps []ast.Expr) (ast.Stmt, error) {
 	// Convert all snapshot ASTs to source
 	args := make([]string, 1, 1+len(snaps))
-	args[0] = strconv.Itoa(pointID)
+	args[0] = strconv.FormatUint(uint64(pointID), 10)
 	for _, snap := range snaps {
 		buf.Reset()
 		if err := format.Node(buf, token.NewFileSet(), snap); err != nil {
@@ -1322,7 +1327,7 @@ func makeSendLensPointStateMessageStmt(buf *bytes.Buffer, pointID int, snaps []a
 // buildImplicitReturnInstrumentation creates a single ExprStmt that
 // snapshots all live vars and calls SendLensPointStateMessage. It is used
 // when the function has no explicit return
-func buildImplicitReturnInstrumentation(buf *bytes.Buffer, pointID int, decls []declInfo) (ast.Stmt, error) {
+func buildImplicitReturnInstrumentation(buf *bytes.Buffer, pointID uint32, decls []declInfo) (ast.Stmt, error) {
 	snaps := make([]ast.Expr, 0, len(decls))
 	seen := make(map[string]bool, len(decls))
 	for _, d := range decls {
@@ -1431,12 +1436,12 @@ func isRecursiveCall(expr ast.Expr, funcName string) bool {
 
 // InjectFuncPointEntry inserts a SendLensPointMessage client call at the very start of the function to
 // track entry coverage into the function.
-func (m *ASTModifier) InjectFuncPointEntry(fn *Function) (int, error) {
-	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID int) {
+func (m *ASTModifier) InjectFuncPointEntry(fn *Function) (uint32, error) {
+	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID uint32) {
 		// build SendLensPointMessage(pointID)
 		stmt := &ast.ExprStmt{X: &ast.CallExpr{
 			Fun:  ast.NewIdent("SendLensPointMessage"),
-			Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: strconv.Itoa(pointID)}},
+			Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: strconv.FormatUint(uint64(pointID), 10)}},
 		}}
 		body.List = append([]ast.Stmt{stmt}, body.List...)
 	})
@@ -1444,12 +1449,12 @@ func (m *ASTModifier) InjectFuncPointEntry(fn *Function) (int, error) {
 
 // InjectFuncPointFinish inserts a SendLensPointMessage client call as a defere at the start of the function
 // to indicate that the function.
-func (m *ASTModifier) InjectFuncPointFinish(fn *Function) (int, error) {
-	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID int) {
+func (m *ASTModifier) InjectFuncPointFinish(fn *Function) (uint32, error) {
+	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID uint32) {
 		// build defer SendLensPointMessage(pointID)
 		deferStmt := &ast.DeferStmt{Call: &ast.CallExpr{
 			Fun:  ast.NewIdent("SendLensPointMessage"),
-			Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: strconv.Itoa(pointID)}},
+			Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: strconv.FormatUint(uint64(pointID), 10)}},
 		}}
 		body.List = append([]ast.Stmt{deferStmt}, body.List...)
 	})

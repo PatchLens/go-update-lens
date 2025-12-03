@@ -311,11 +311,11 @@ func (d *DefaultTestProvider) Cleanup() {}
 type DefaultUpdateAnalysisProvider struct {
 	// PreUpdateExtensionConfig is an optional function called before the first test run (old module version).
 	// Returns a map of point IDs to frame keys for storage.
-	PreUpdateExtensionConfig func(astEditor *ASTModifier) (map[int]*string, error)
+	PreUpdateExtensionConfig func(astEditor *ASTModifier) (map[uint32]*string, error)
 
 	// PostUpdateExtensionConfig is an optional function called before the second test run (new module version).
 	// Returns a map of point IDs to frame keys for storage.
-	PostUpdateExtensionConfig func(astEditor *ASTModifier) (map[int]*string, error)
+	PostUpdateExtensionConfig func(astEditor *ASTModifier) (map[uint32]*string, error)
 }
 
 func (d *DefaultUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config,
