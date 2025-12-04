@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/format"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -827,8 +828,6 @@ func Foo(n int) interface{} {
 	}
 }
 
-// TestReturnNilToInterface tests the fix for "use of untyped nil in assignment"
-// when returning nil to interface types
 func TestReturnNilToInterface(t *testing.T) {
 	t.Parallel()
 
@@ -896,19 +895,17 @@ func GetPtr() *int {
 			// Format the block to ensure it's valid Go code
 			var genBuf bytes.Buffer
 			err = format.Node(&genBuf, token.NewFileSet(), blk)
-			require.NoError(t, err, "Should generate valid Go code")
+			require.NoError(t, err)
 
 			// Check we don't generate invalid "tmpX := nil"
 			generated := genBuf.String()
-			assert.NotContains(t, generated, "lenSyntheticTmp0 := nil",
-				"Should not generate untyped nil assignment")
+			assert.NotContains(t, generated, "lenSyntheticTmp0 := nil")
 
 			// Check that the generated code handles nil correctly
 			// Even if not using temp, nil should be handled properly
 			if ret.Results[0].(*ast.Ident).Name == "nil" {
 				// nil returns should not cause invalid syntax
-				assert.NotContains(t, generated, ":= nil",
-					"Should not have untyped nil in short variable declaration")
+				assert.NotContains(t, generated, ":= nil")
 			}
 		})
 	}
@@ -934,15 +931,143 @@ func TestMakeReturnTempNilHandling(t *testing.T) {
 	// Format and check it's valid
 	var buf bytes.Buffer
 	err := format.Node(&buf, token.NewFileSet(), stmts[0])
-	require.NoError(t, err, "Should generate valid Go statement")
+	require.NoError(t, err)
 
 	// Should be "var lenSyntheticRet0 error = nil"
 	generated := buf.String()
 	assert.Contains(t, generated, "var lenSyntheticRet0 error = nil")
-	assert.NotContains(t, generated, ":= nil", "Should not use := with nil")
+	assert.NotContains(t, generated, ":= nil")
 }
 
-// TestImplicitReturnInstrumentation tests handling of functions with no explicit return
+func TestBuildReturnInstrumentationBareReturnBlankIdentifier(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name             string
+		src              string
+		funcResultTypes  []string
+		funcResultNames  []string
+		expectBareReturn bool // Should the generated return be bare (no values)?
+		expectedSnaps    []string
+	}{
+		{
+			name: "named_and_blank",
+			src: `package foo
+func GetTokens() (out []int, _ error) {
+	return
+}`,
+			funcResultTypes:  []string{"[]int", "error"},
+			funcResultNames:  []string{"out", "_"},
+			expectBareReturn: true,
+			expectedSnaps:    []string{"out"}, // Only capture 'out', not '_'
+		},
+		{
+			name: "all_blank",
+			src: `package foo
+func GetBlanks() (_ int, _ error) {
+	return
+}`,
+			funcResultTypes:  []string{"int", "error"},
+			funcResultNames:  []string{"_", "_"},
+			expectBareReturn: true,
+			expectedSnaps:    []string{}, // No snapshots for blank identifiers
+		},
+		{
+			name: "all_named_no_blank",
+			src: `package foo
+func GetPair() (x int, err error) {
+	return
+}`,
+			funcResultTypes:  []string{"int", "error"},
+			funcResultNames:  []string{"x", "err"},
+			expectBareReturn: false, // Should return explicit values
+			expectedSnaps:    []string{"x", "err"},
+		},
+		{
+			name: "single_blank",
+			src: `package foo
+func GetBlank() (_ int) {
+	return
+}`,
+			funcResultTypes:  []string{"int"},
+			funcResultNames:  []string{"_"},
+			expectBareReturn: true,
+			expectedSnaps:    []string{},
+		},
+		{
+			name: "mixed_blank_named",
+			src: `package foo
+func GetMixed() (_ int, result string, _ error) {
+	return
+}`,
+			funcResultTypes:  []string{"int", "string", "error"},
+			funcResultNames:  []string{"_", "result", "_"},
+			expectBareReturn: true,
+			expectedSnaps:    []string{"result"}, // Only capture 'result'
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "test.go", tc.src, 0)
+			require.NoError(t, err)
+			var buf bytes.Buffer
+
+			fn := file.Decls[0].(*ast.FuncDecl)
+			var ret *ast.ReturnStmt
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if r, ok := n.(*ast.ReturnStmt); ok {
+					ret = r
+					return false
+				}
+				return true
+			})
+			require.NotNil(t, ret)
+			require.Empty(t, ret.Results)
+
+			// Build funcResultTypes from strings
+			funcResultTypes := make([]ast.Expr, len(tc.funcResultTypes))
+			for i, typeStr := range tc.funcResultTypes {
+				typ, err := parser.ParseExpr(typeStr)
+				require.NoError(t, err)
+				funcResultTypes[i] = typ
+			}
+
+			decls := visibleDeclsBefore(fn, ret.Pos())
+			blk, err := buildReturnInstrumentation(&buf, ret, 1, &Function{FunctionName: "Test"}, decls,
+				funcResultTypes, nil, tc.funcResultNames)
+			require.NoError(t, err)
+
+			var genBuf bytes.Buffer
+			err = format.Node(&genBuf, token.NewFileSet(), blk)
+			require.NoError(t, err)
+
+			generated := genBuf.String()
+
+			// Should never try to use '_' as a value
+			assert.NotContains(t, generated, "= _")
+			assert.NotContains(t, generated, ": _")
+			assert.NotRegexp(t, `\b_\s*\}`, generated)
+
+			// Check the return statement
+			rs, ok := blk.List[len(blk.List)-1].(*ast.ReturnStmt)
+			require.True(t, ok)
+
+			if tc.expectBareReturn {
+				assert.Empty(t, rs.Results)
+			} else {
+				assert.NotEmpty(t, rs.Results)
+			}
+
+			// Verify expected snapshots are present
+			for _, snapName := range tc.expectedSnaps {
+				assert.Contains(t, generated, snapName)
+			}
+		})
+	}
+}
+
 func TestImplicitReturnInstrumentation(t *testing.T) {
 	t.Parallel()
 
@@ -978,7 +1103,56 @@ func DoNothing() {
 	_ = x
 }`,
 			expectReturn:   false,
-			returnVarNames: nil, // nil for void functions (matches actual behavior)
+			returnVarNames: nil,
+		},
+		{
+			name: "unnamed_returns_no_explicit_return",
+			src: `package foo
+func GetValue() (int, error) {
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"", ""},
+		},
+		{
+			name: "single_unnamed_return_no_explicit",
+			src: `package foo
+func GetString() string {
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{""},
+		},
+		{
+			name: "mixed_named_unnamed_no_explicit",
+			src: `package foo
+func GetMixed() (_ int, err error) {
+	err = nil
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"_", "err"},
+		},
+		{
+			name: "all_blank_identifiers",
+			src: `package foo
+func GetBlanks() (_ int, _ error) {
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"_", "_"},
+		},
+		{
+			name: "mixed_blank_named_unnamed",
+			src: `package foo
+func GetComplex() (_ int, result string, err error) {
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"_", "result", "err"},
+		},
+		{
+			name: "single_blank_identifier",
+			src: `package foo
+func GetBlank() (_ int) {
+}`,
+			expectReturn:   true,
+			returnVarNames: []string{"_"},
 		},
 	}
 
@@ -1007,30 +1181,99 @@ func DoNothing() {
 			assert.Equal(t, tc.returnVarNames, funcResultNames)
 
 			// Check if we should add a return statement
-			// The logic matches InjectFuncPointReturnStates: allNamed requires all to have names
-			allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
-			assert.Equal(t, tc.expectReturn, allNamed,
-				"allNamed calculation mismatch for %s", tc.name)
+			// Add return if there are return values (named or unnamed)
+			hasReturnValues := len(funcResultNames) > 0
+			assert.Equal(t, tc.expectReturn, hasReturnValues)
 
-			if allNamed {
-				// Build the return statement that would be added
-				returnExprs := make([]ast.Expr, len(funcResultNames))
-				for i, name := range funcResultNames {
-					returnExprs[i] = ast.NewIdent(name)
-				}
-				retStmt := &ast.ReturnStmt{Results: returnExprs}
+			if hasReturnValues {
+				// Build the return statement that would be added - matching InjectFuncPointReturnStates logic
+				allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
 
-				// Format it to check validity
-				var buf bytes.Buffer
-				err := format.Node(&buf, token.NewFileSet(), retStmt)
-				require.NoError(t, err, "Return statement should be valid")
-
-				// Check it has the right variables
-				generated := buf.String()
-				for _, name := range tc.returnVarNames {
-					if name != "" {
-						assert.Contains(t, generated, name)
+				// Check if ALL returns are blank identifiers
+				allBlank := true
+				for _, name := range funcResultNames {
+					if name != "" && name != "_" {
+						allBlank = false
+						break
 					}
+				}
+
+				var buf bytes.Buffer
+
+				if allBlank {
+					// All blank: naked return
+					retStmt := &ast.ReturnStmt{}
+					err := format.Node(&buf, token.NewFileSet(), retStmt)
+					require.NoError(t, err)
+					assert.Equal(t, "return", buf.String())
+				} else if allNamed {
+					// All named (but not all blank): return named variables
+					returnExprs := make([]ast.Expr, len(funcResultNames))
+					for i, name := range funcResultNames {
+						if name != "" && name != "_" {
+							returnExprs[i] = ast.NewIdent(name)
+						} else {
+							// Get the type for blank identifier
+							funcResultTypes := make([]ast.Expr, 0)
+							if fn.Type.Results != nil {
+								for _, field := range fn.Type.Results.List {
+									if len(field.Names) == 0 {
+										funcResultTypes = append(funcResultTypes, field.Type)
+									} else {
+										for range field.Names {
+											funcResultTypes = append(funcResultTypes, field.Type)
+										}
+									}
+								}
+							}
+							zeroVal, err := zeroValueForType(&buf, funcResultTypes[i])
+							require.NoError(t, err)
+							returnExprs[i] = zeroVal
+						}
+					}
+					retStmt := &ast.ReturnStmt{Results: returnExprs}
+					buf.Reset()
+					err := format.Node(&buf, token.NewFileSet(), retStmt)
+					require.NoError(t, err)
+
+					generated := buf.String()
+					// Should not contain "_" as a value
+					assert.NotContains(t, generated, "return _")
+				} else {
+					// Has unnamed: generate zero values
+					funcResultTypes := make([]ast.Expr, 0)
+					if fn.Type.Results != nil {
+						for _, field := range fn.Type.Results.List {
+							if len(field.Names) == 0 {
+								funcResultTypes = append(funcResultTypes, field.Type)
+							} else {
+								for range field.Names {
+									funcResultTypes = append(funcResultTypes, field.Type)
+								}
+							}
+						}
+					}
+
+					returnExprs := make([]ast.Expr, len(funcResultTypes))
+					for i, typ := range funcResultTypes {
+						if allNamed && funcResultNames[i] != "" && funcResultNames[i] != "_" {
+							returnExprs[i] = ast.NewIdent(funcResultNames[i])
+						} else if funcResultNames[i] != "" && funcResultNames[i] != "_" {
+							returnExprs[i] = ast.NewIdent(funcResultNames[i])
+						} else {
+							zeroVal, err := zeroValueForType(&buf, typ)
+							require.NoError(t, err)
+							returnExprs[i] = zeroVal
+						}
+					}
+					retStmt := &ast.ReturnStmt{Results: returnExprs}
+
+					buf.Reset()
+					err := format.Node(&buf, token.NewFileSet(), retStmt)
+					require.NoError(t, err)
+					assert.NotEmpty(t, buf.String())
+					// Should not contain "_" as a value
+					assert.NotContains(t, buf.String(), "return _")
 				}
 			}
 		})
@@ -1621,9 +1864,89 @@ func ProcessData() {
 			// Verify idempotency - calling again with same predicate should not re-instrument
 			pointMap2, err := modifier.InjectFuncPointBeforeCall(&fn, tc.predicate)
 			require.NoError(t, err)
-			require.Empty(t, pointMap2, "Second call with same predicate should return empty map")
+			require.Empty(t, pointMap2)
 		})
 	}
+
+	t.Run("type_reservation", func(t *testing.T) {
+		tests := []struct {
+			name           string
+			source         string
+			expectedInCode string
+		}{
+			{
+				name: "selector_expr_syscall_constant",
+				source: `package test
+import "syscall"
+func foo() {
+	bar(syscall.SYS_IOCTL)
+}
+func bar(x uintptr) {}`,
+				expectedInCode: "syscall.SYS_IOCTL",
+			},
+			{
+				name: "selector_expr_field_access",
+				source: `package test
+type Config struct { Value int }
+func foo(c Config) {
+	bar(c.Value)
+}
+func bar(x int) {}`,
+				expectedInCode: "c.Value",
+			},
+			{
+				name: "basic_lit_untyped_constant",
+				source: `package test
+func foo() {
+	bar(42)
+}
+func bar(x int64) {}`,
+				expectedInCode: "42",
+			},
+			{
+				name: "basic_lit_string",
+				source: `package test
+func foo() {
+	bar("hello")
+}
+func bar(s string) {}`,
+				expectedInCode: `"hello"`,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dir := t.TempDir()
+				filePath := filepath.Join(dir, "test.go")
+				err := os.WriteFile(filePath, []byte(tt.source), 0o644)
+				require.NoError(t, err)
+
+				modifier := &ASTModifier{}
+				fn := Function{
+					FunctionIdent: "test:bar",
+					FunctionName:  "bar",
+					PackageName:   "test",
+					FilePath:      filePath,
+				}
+
+				_, err = modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+					if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "bar" {
+						return "test", true
+					}
+					return nil, false
+				})
+				require.NoError(t, err)
+
+				err = modifier.CommitFile(filePath)
+				require.NoError(t, err)
+
+				modifiedSrc, err := os.ReadFile(filePath)
+				require.NoError(t, err)
+
+				assert.Contains(t, string(modifiedSrc), tt.expectedInCode)
+			})
+		}
+	})
 }
 
 func TestInjectFuncPointBeforeCallMultipleSinks(t *testing.T) {
@@ -1834,7 +2157,7 @@ func TestBuildCallInstrumentationWithArgs(t *testing.T) {
 			call, err := parser.ParseExpr(tc.callExpr)
 			require.NoError(t, err)
 			callExpr, ok := call.(*ast.CallExpr)
-			require.True(t, ok, "Expected CallExpr")
+			require.True(t, ok)
 
 			// Build a file node with fmt import for proper package detection
 			const fileSrc = `package test
@@ -2049,7 +2372,6 @@ func ProcessData(x, y int) {
 
 	require.NoError(t, modifier.CommitFile(filePath))
 
-	// Read modified file
 	modifiedSrc, err := os.ReadFile(filePath)
 	require.NoError(t, err)
 	modifiedStr := string(modifiedSrc)
@@ -2682,10 +3004,10 @@ func TestBuildCallInstrumentationWithReceiver(t *testing.T) {
 
 			// If synthetic receiver expected, verify the receiver assignment
 			if tc.expectSynthetic {
-				require.GreaterOrEqual(t, len(blk.List), 2, "Should have receiver assignment and send statement")
+				require.GreaterOrEqual(t, len(blk.List), 2)
 				// First statement should be receiver assignment
 				assign, ok := blk.List[0].(*ast.AssignStmt)
-				require.True(t, ok, "First statement should be assignment")
+				require.True(t, ok)
 				require.Len(t, assign.Lhs, 1)
 				ident, ok := assign.Lhs[0].(*ast.Ident)
 				require.True(t, ok)
@@ -2765,4 +3087,738 @@ func TestMakeSnapshotLitWithReceiverPrefix(t *testing.T) {
 	}
 
 	assert.Equal(t, "recv0", nameValue)
+}
+
+func TestZeroValueForType(t *testing.T) {
+	tests := []struct {
+		name     string
+		typeExpr string
+		expected string
+	}{
+		{"int", "int", "0"},
+		{"int8", "int8", "0"},
+		{"int16", "int16", "0"},
+		{"int32", "int32", "0"},
+		{"int64", "int64", "0"},
+		{"uint", "uint", "0"},
+		{"uint8", "uint8", "0"},
+		{"uint16", "uint16", "0"},
+		{"uint32", "uint32", "0"},
+		{"uint64", "uint64", "0"},
+		{"uintptr", "uintptr", "0"},
+		{"float32", "float32", "0"},
+		{"float64", "float64", "0"},
+		{"complex64", "complex64", "0"},
+		{"complex128", "complex128", "0"},
+		{"byte", "byte", "0"},
+		{"rune", "rune", "0"},
+		{"bool", "bool", "false"},
+		{"string", "string", `""`},
+		{"error", "error", "nil"},
+		{"pointer", "*int", "nil"},
+		{"slice", "[]int", "nil"},
+		{"map", "map[string]int", "nil"},
+		{"channel", "chan int", "nil"},
+		{"interface", "interface{}", "nil"},
+		{"struct", "struct{}", "struct{}{}"},
+		{"array", "[5]int", "[5]int{}"},
+		{"generic_single", "Optional[int]", "*new(Optional[int])"},
+		{"generic_multi", "Map[string, int]", "*new(Map[string, int])"},
+		{"func_type", "func(int) string", "nil"},
+		{"named_type", "MyType", "MyType{}"},
+		{"selector_type", "pkg.Type", "pkg.Type{}"},
+		{"pointer_to_struct", "*struct{}", "nil"},
+		{"slice_of_pointers", "[]*int", "nil"},
+		{"map_with_pointer_value", "map[string]*int", "nil"},
+		{"chan_send", "chan<- int", "nil"},
+		{"chan_recv", "<-chan int", "nil"},
+		{"array_of_arrays", "[3][4]int", "[3][4]int{}"},
+		{"slice_of_slices", "[][]string", "nil"},
+		{"interface_with_methods", "interface{ String() string }", "nil"},
+		{"func_with_multiple_returns", "func(int) (string, error)", "nil"},
+		{"variadic_func", "func(...int) string", "nil"},
+		{"blank_identifier", "_", "nil"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			expr, err := parser.ParseExpr(tt.typeExpr)
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			zeroVal, err := zeroValueForType(&buf, expr)
+			require.NoError(t, err)
+
+			var resultBuf bytes.Buffer
+			err = printer.Fprint(&resultBuf, fset, zeroVal)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, resultBuf.String())
+		})
+	}
+}
+
+func TestDeferGoInlineFunctionWrapping(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        string
+		containsDefer bool
+		containsGo    bool
+	}{
+		{
+			name: "defer_with_instrumentation",
+			source: `package test
+func foo() {
+	defer bar(1, 2)
+}
+func bar(a, b int) {}`,
+			containsDefer: true,
+		},
+		{
+			name: "go_with_instrumentation",
+			source: `package test
+func foo() {
+	go bar(1, 2)
+}
+func bar(a, b int) {}`,
+			containsGo: true,
+		},
+		{
+			name: "defer_with_complex_args",
+			source: `package test
+func getVal() int { return 5 }
+func foo() {
+	defer bar(getVal())
+}
+func bar(a int) {}`,
+			containsDefer: true,
+		},
+		{
+			name: "go_with_complex_args",
+			source: `package test
+func getVal() int { return 5 }
+func foo() {
+	go bar(getVal())
+}
+func bar(a int) {}`,
+			containsGo: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, "test.go")
+			err := os.WriteFile(filePath, []byte(tt.source), 0o644)
+			require.NoError(t, err)
+
+			modifier := &ASTModifier{}
+			fn := Function{
+				FunctionIdent: "test:bar",
+				FunctionName:  "bar",
+				PackageName:   "test",
+				FilePath:      filePath,
+			}
+
+			_, err = modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "bar" {
+					return "test", true
+				}
+				return nil, false
+			})
+			require.NoError(t, err)
+
+			err = modifier.CommitFile(filePath)
+			require.NoError(t, err)
+
+			modifiedSrc, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			modifiedStr := string(modifiedSrc)
+
+			if tt.containsDefer {
+				assert.Contains(t, modifiedStr, "defer")
+			}
+			if tt.containsGo {
+				assert.Contains(t, modifiedStr, "go")
+			}
+		})
+	}
+}
+
+func TestFuncLitInstrumentation(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name           string
+		src            string
+		expectedPoints int
+		description    string
+		funcName       string // optional, defaults to "Outer"
+		targetFunc     string // optional, defaults to "Target"
+	}{
+		{
+			name: "callback_assignment",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	callback := func(x int) {
+		Target(x)
+	}
+	_ = callback
+}`,
+			expectedPoints: 1,
+			description:    "Target(x) inside FuncLit should be instrumented",
+		},
+		{
+			name: "iife",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	func() {
+		Target(1)
+	}()
+}`,
+			expectedPoints: 1,
+			description:    "Target() inside IIFE should be instrumented",
+		},
+		{
+			name: "funclit_as_argument",
+			src: `package testpkg
+
+func Target(x int) {}
+func Process(f func(int)) {}
+
+func Outer() {
+	Process(func(x int) {
+		Target(x)
+	})
+}`,
+			expectedPoints: 1,
+			description:    "Target() inside FuncLit argument should be instrumented",
+		},
+		{
+			name: "nested_funclit",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	outer := func() {
+		inner := func() {
+			Target(1)
+		}
+		_ = inner
+	}
+	_ = outer
+}`,
+			expectedPoints: 1,
+			description:    "Target() in nested FuncLit should be instrumented",
+		},
+		{
+			name: "defer_with_existing_funclit",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	defer func() {
+		Target(1)
+	}()
+}`,
+			expectedPoints: 1,
+			description:    "Target() inside deferred FuncLit should be instrumented",
+		},
+		{
+			name: "go_with_existing_funclit",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	go func() {
+		Target(1)
+	}()
+}`,
+			expectedPoints: 1,
+			description:    "Target() inside goroutine FuncLit should be instrumented",
+		},
+		{
+			name: "funclit_with_params_not_extracted",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	callback := func(va int, vb string) {
+		Target(va)
+	}
+	_ = callback
+}`,
+			expectedPoints: 1,
+			description:    "FuncLit params (va, vb) should NOT be extracted outside the FuncLit",
+		},
+		{
+			name: "multiple_funclits",
+			src: `package testpkg
+
+func Target(x int) {}
+
+func Outer() {
+	f1 := func() { Target(1) }
+	f2 := func() { Target(2) }
+	_ = f1
+	_ = f2
+}`,
+			expectedPoints: 2,
+			description:    "Both FuncLits should have Target() instrumented",
+		},
+		{
+			name: "defer_with_funclit_arg_containing_target",
+			src: `package testpkg
+
+func Target(x int) int { return x }
+
+func Outer() {
+	defer Target(func() int { return Target(1) }())
+}`,
+			expectedPoints: 2,
+			description:    "Both outer Target and inner Target inside FuncLit arg should be instrumented",
+		},
+		{
+			name: "go_with_funclit_arg_containing_target",
+			src: `package testpkg
+
+func Target(x int) int { return x }
+
+func Outer() {
+	go Target(func() int { return Target(1) }())
+}`,
+			expectedPoints: 2,
+			description:    "Both outer Target and inner Target inside FuncLit arg should be instrumented",
+		},
+		{
+			name: "struct_field_funclit_protobuf_pattern",
+			src: `package testpkg
+
+type pointer int
+type coderFieldInfo struct {
+	funcs coderFuncs
+}
+type coderFuncs struct {
+	merge func(dst, src pointer, info *coderFieldInfo)
+}
+
+func Target(dst, src pointer, info *coderFieldInfo) {}
+
+func Setup(first *coderFieldInfo) {
+	first.funcs.merge = func(dst, src pointer, info *coderFieldInfo) {
+		Target(dst, src, info)
+	}
+}`,
+			expectedPoints: 1,
+			description:    "Protobuf-like pattern: Target inside struct field FuncLit should be instrumented in correct scope",
+			funcName:       "Setup",
+		},
+		{
+			name: "k8s_marshal_pattern",
+			src: `package testpkg
+
+type MarshalOptions struct{}
+type Encoder struct{}
+type addressableValue struct{}
+type fncs struct {
+	marshal func(mo MarshalOptions, enc *Encoder, va addressableValue) error
+}
+
+func targetCall(va addressableValue) error { return nil }
+
+func Setup() {
+	var f fncs
+	f.marshal = func(mo MarshalOptions, enc *Encoder, va addressableValue) error {
+		return targetCall(va)
+	}
+	_ = f
+}`,
+			expectedPoints: 1,
+			description:    "K8s-like pattern: targetCall inside marshal FuncLit should be instrumented in correct scope",
+			funcName:       "Setup",
+			targetFunc:     "targetCall",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, "test.go")
+			require.NoError(t, os.WriteFile(filePath, []byte(tc.src), 0o644))
+
+			// Use defaults if not specified
+			funcName := tc.funcName
+			if funcName == "" {
+				funcName = "Outer"
+			}
+			targetFunc := tc.targetFunc
+			if targetFunc == "" {
+				targetFunc = "Target"
+			}
+
+			modifier := &ASTModifier{}
+			fn := Function{
+				FunctionIdent: "testpkg:" + funcName,
+				FunctionName:  funcName,
+				PackageName:   "testpkg",
+				FilePath:      filePath,
+			}
+
+			// Only match target function calls
+			pointMap, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					return struct{}{}, ident.Name == targetFunc
+				}
+				return struct{}{}, false
+			})
+			require.NoError(t, err, tc.description)
+			assert.Len(t, pointMap, tc.expectedPoints, tc.description)
+
+			require.NoError(t, modifier.CommitFile(filePath))
+
+			modifiedSrc, err := os.ReadFile(filePath)
+			require.NoError(t, err)
+			modifiedStr := string(modifiedSrc)
+
+			// Verify the monitoring call was inserted
+			assert.Contains(t, modifiedStr, sendLensPointStateMessageFunc)
+
+			// Verify the code compiles
+			fset := token.NewFileSet()
+			_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.AllErrors)
+			require.NoError(t, err)
+
+			// For the "funclit_with_params_not_extracted" test, verify that
+			// the FuncLit params are NOT extracted outside the FuncLit
+			if tc.name == "funclit_with_params_not_extracted" {
+				// The instrumentation should be INSIDE the func literal, not before the assignment
+				// Check that we don't have lenSyntheticArg with va/vb value before the callback assignment
+				lines := strings.Split(modifiedStr, "\n")
+				for i, line := range lines {
+					if strings.Contains(line, "callback :=") {
+						// The previous non-empty lines should NOT contain extraction of va or vb
+						for j := i - 1; j >= 0 && j > i-5; j-- {
+							if strings.TrimSpace(lines[j]) != "" {
+								assert.NotContains(t, lines[j], "va")
+								assert.NotContains(t, lines[j], "vb")
+							}
+						}
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestZeroValue(t *testing.T) {
+	t.Parallel()
+
+	t.Run("package_conflict", func(t *testing.T) {
+		src := `package test
+import "math"
+
+// math is a type that conflicts with the package name
+type math int
+
+func GetMath() (math, error) {
+	_ = math.Pi // using the package
+	if true {
+		return 42, nil
+	}
+}
+`
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		err := os.WriteFile(testFile, []byte(src), 0644)
+		require.NoError(t, err)
+
+		// Parse
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, testFile, src, 0)
+		require.NoError(t, err)
+
+		// Create modifier and inject
+		modifier := &ASTModifier{}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "GetMath" {
+				funcInfo := &Function{
+					FilePath:      testFile,
+					PackageName:   "test",
+					FunctionIdent: "test:GetMath",
+					FunctionName:  "GetMath",
+				}
+				_, err := modifier.InjectFuncPointReturnStates(funcInfo)
+				require.NoError(t, err)
+				break
+			}
+		}
+
+		// Read modified file and compile-check
+		output, err := os.ReadFile(testFile)
+		require.NoError(t, err)
+		outputStr := string(output)
+
+		// Should compile without "math is not a type" error
+		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
+		require.NoError(t, err)
+
+		// Should have added a return statement
+		assert.Contains(t, outputStr, "return")
+	})
+
+	t.Run("blank_identifier", func(t *testing.T) {
+		src := `package test
+
+func ProcessData() (_ int, err error) {
+	if true {
+		return 42, nil
+	}
+}
+`
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		err := os.WriteFile(testFile, []byte(src), 0644)
+		require.NoError(t, err)
+
+		// Parse
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, testFile, src, 0)
+		require.NoError(t, err)
+
+		// Create modifier and inject
+		modifier := &ASTModifier{}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "ProcessData" {
+				funcInfo := &Function{
+					FilePath:      testFile,
+					PackageName:   "test",
+					FunctionIdent: "test:ProcessData",
+					FunctionName:  "ProcessData",
+				}
+				_, err := modifier.InjectFuncPointReturnStates(funcInfo)
+				require.NoError(t, err)
+				break
+			}
+		}
+
+		output, err := os.ReadFile(testFile)
+		require.NoError(t, err)
+		outputStr := string(output)
+
+		// Should not contain "return _" (which would be invalid)
+		assert.NotContains(t, outputStr, "return _")
+
+		// Should compile
+		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("interface_type", func(t *testing.T) {
+		src := `package test
+import "math"
+
+// math is an interface that conflicts with the package name
+type math interface {
+	Calculate() float64
+}
+
+func GetInterface() math {
+	_ = math.Pi // using the package
+	if true {
+		return nil
+	}
+}
+`
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		err := os.WriteFile(testFile, []byte(src), 0644)
+		require.NoError(t, err)
+
+		// Parse
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, testFile, src, 0)
+		require.NoError(t, err)
+
+		// Create modifier and inject
+		modifier := &ASTModifier{}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "GetInterface" {
+				funcInfo := &Function{
+					FilePath:      testFile,
+					PackageName:   "test",
+					FunctionIdent: "test:GetInterface",
+					FunctionName:  "GetInterface",
+				}
+				_, err := modifier.InjectFuncPointReturnStates(funcInfo)
+				require.NoError(t, err)
+				break
+			}
+		}
+
+		output, err := os.ReadFile(testFile)
+		require.NoError(t, err)
+		outputStr := string(output)
+
+		// Should compile
+		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("all_blank_identifiers", func(t *testing.T) {
+		src := `package test
+
+func ProcessBoth() (_ int, _ error) {
+	if true {
+		return 42, nil
+	}
+}
+`
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		err := os.WriteFile(testFile, []byte(src), 0644)
+		require.NoError(t, err)
+
+		// Parse
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, testFile, src, 0)
+		require.NoError(t, err)
+
+		// Create modifier and inject
+		modifier := &ASTModifier{}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "ProcessBoth" {
+				funcInfo := &Function{
+					FilePath:      testFile,
+					PackageName:   "test",
+					FunctionIdent: "test:ProcessBoth",
+					FunctionName:  "ProcessBoth",
+				}
+				_, err := modifier.InjectFuncPointReturnStates(funcInfo)
+				require.NoError(t, err)
+				break
+			}
+		}
+
+		output, err := os.ReadFile(testFile)
+		require.NoError(t, err)
+		outputStr := string(output)
+
+		// Should not contain "return _" (which would be invalid)
+		assert.NotContains(t, outputStr, "return _")
+		// Should contain naked return
+		assert.Contains(t, outputStr, "return")
+
+		// Should compile
+		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("mixed_blank_named_unnamed", func(t *testing.T) {
+		src := `package test
+
+func GetComplex() (_ int, name string, err error) {
+	if true {
+		return 1, "test", nil
+	}
+}
+`
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		err := os.WriteFile(testFile, []byte(src), 0644)
+		require.NoError(t, err)
+
+		// Parse
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, testFile, src, 0)
+		require.NoError(t, err)
+
+		// Create modifier and inject
+		modifier := &ASTModifier{}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "GetComplex" {
+				funcInfo := &Function{
+					FilePath:      testFile,
+					PackageName:   "test",
+					FunctionIdent: "test:GetComplex",
+					FunctionName:  "GetComplex",
+				}
+				_, err := modifier.InjectFuncPointReturnStates(funcInfo)
+				require.NoError(t, err)
+				break
+			}
+		}
+
+		output, err := os.ReadFile(testFile)
+		require.NoError(t, err)
+		outputStr := string(output)
+
+		// Should not contain "return _" (which would be invalid)
+		assert.NotContains(t, outputStr, "return _")
+		// Should use named variable for "name"
+		assert.Contains(t, outputStr, "name")
+
+		// Should compile
+		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("single_blank_identifier", func(t *testing.T) {
+		src := `package test
+
+func GetBlank() (_ string) {
+	if true {
+		return "test"
+	}
+}
+`
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "test.go")
+		err := os.WriteFile(testFile, []byte(src), 0644)
+		require.NoError(t, err)
+
+		// Parse
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, testFile, src, 0)
+		require.NoError(t, err)
+
+		// Create modifier and inject
+		modifier := &ASTModifier{}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "GetBlank" {
+				funcInfo := &Function{
+					FilePath:      testFile,
+					PackageName:   "test",
+					FunctionIdent: "test:GetBlank",
+					FunctionName:  "GetBlank",
+				}
+				_, err := modifier.InjectFuncPointReturnStates(funcInfo)
+				require.NoError(t, err)
+				break
+			}
+		}
+
+		output, err := os.ReadFile(testFile)
+		require.NoError(t, err)
+		outputStr := string(output)
+
+		// Should not contain "return _" (which would be invalid)
+		assert.NotContains(t, outputStr, "return _")
+		// Should have a return statement
+		assert.Contains(t, outputStr, "return")
+
+		// Should compile
+		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
+		require.NoError(t, err)
+	})
 }

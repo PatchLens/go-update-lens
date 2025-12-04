@@ -283,7 +283,7 @@ func rewriteAstClientTemplate(buf *bytes.Buffer, src []byte, newPkg string,
 	return buf.Bytes(), nil
 }
 
-// updateConstLiterals walks every const declaration and, if it finds an
+// updateConstLiterals walks every const and var declaration and, if it finds an
 // identifier that matches one of the keys in `values`, replaces the *literal*
 // on the same index position within the ValueSpec.
 func updateConstLiterals(f *ast.File, values map[string]string) {
@@ -292,7 +292,7 @@ func updateConstLiterals(f *ast.File, values map[string]string) {
 	}
 	for _, decl := range f.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
-		if !ok || genDecl.Tok != token.CONST {
+		if !ok || (genDecl.Tok != token.CONST && genDecl.Tok != token.VAR) {
 			continue
 		}
 		for _, spec := range genDecl.Specs {
@@ -572,14 +572,43 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]uint32, error
 
 		funcDecl.Body.List = append(funcDecl.Body.List, stmt)
 
-		// If function has named return values, add explicit return statement to maintain validity
-		allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
-		if allNamed {
-			returnExprs := make([]ast.Expr, len(funcResultNames))
-			for i, name := range funcResultNames {
-				returnExprs[i] = ast.NewIdent(name)
+		// If function has return values, add explicit return statement
+		hasReturnValues := len(funcResultTypes) > 0
+		if hasReturnValues {
+			allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
+
+			// Check if ALL returns are non-blank named identifiers
+			// We can only use naked return if ALL returns are named AND non-blank
+			allNamedNonBlank := allNamed
+			for _, name := range funcResultNames {
+				if name == "_" {
+					allNamedNonBlank = false
+					break
+				}
 			}
-			funcDecl.Body.List = append(funcDecl.Body.List, &ast.ReturnStmt{Results: returnExprs})
+
+			if allNamedNonBlank {
+				// All returns are named and non-blank - use naked return
+				funcDecl.Body.List = append(funcDecl.Body.List, &ast.ReturnStmt{})
+			} else {
+				// Need explicit return values
+				returnExprs := make([]ast.Expr, len(funcResultTypes))
+				for i, typ := range funcResultTypes {
+					// Use named return if it's available and not a blank identifier
+					if allNamed && funcResultNames[i] != "" && funcResultNames[i] != "_" {
+						// Use the named return variable
+						returnExprs[i] = ast.NewIdent(funcResultNames[i])
+					} else {
+						// Generate zero value for unnamed or blank identifier returns
+						zeroVal, err := zeroValueForType(&buf, typ)
+						if err != nil {
+							return nil, fmt.Errorf("failed to generate zero value for return type: %w", err)
+						}
+						returnExprs[i] = zeroVal
+					}
+				}
+				funcDecl.Body.List = append(funcDecl.Body.List, &ast.ReturnStmt{Results: returnExprs})
+			}
 		}
 	}
 	// mark as updated
@@ -631,11 +660,18 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	pointMap := make(map[uint32]any)
 	var buf bytes.Buffer
 
-	// Helper to find a matching call in a node, returns the call and its metadata if found
+	// Helper to find a matching call in a node, returns the call and its metadata if found.
+	// Does NOT descend into function literals - they have their own scope and are processed
+	// separately via rewriteFuncLitsIn to avoid extracting variables from the wrong scope.
 	findMatchingCall := func(node ast.Node) (*ast.CallExpr, any) {
 		var matchedCall *ast.CallExpr
 		var metadata any
 		ast.Inspect(node, func(n ast.Node) bool {
+			// Don't descend into function literals - they have their own scope
+			// and will be processed separately via rewriteFuncLitsIn
+			if _, isFuncLit := n.(*ast.FuncLit); isFuncLit {
+				return false
+			}
 			if call, ok := n.(*ast.CallExpr); ok {
 				if m, inject := shouldInject(call); inject {
 					matchedCall = call
@@ -649,6 +685,30 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 	}
 
 	var rewriteBlock func(*ast.BlockStmt) error
+
+	// Helper to find and recurse into all FuncLit bodies in a node.
+	// This ensures we instrument calls inside function literals while keeping
+	// the instrumentation in the correct scope (inside the FuncLit body).
+	rewriteFuncLitsIn := func(node ast.Node) error {
+		var firstErr error
+		ast.Inspect(node, func(n ast.Node) bool {
+			if firstErr != nil {
+				return false
+			}
+			if fl, ok := n.(*ast.FuncLit); ok {
+				if fl.Body != nil {
+					if err := rewriteBlock(fl.Body); err != nil {
+						firstErr = err
+						return false
+					}
+				}
+				return false // Don't descend further into this FuncLit (we just processed it)
+			}
+			return true
+		})
+		return firstErr
+	}
+
 	rewriteBlock = func(blk *ast.BlockStmt) error {
 		newStmts := make([]ast.Stmt, 0, len(blk.List))
 		for _, st := range blk.List {
@@ -668,14 +728,82 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 			case *ast.ReturnStmt:
 				matchedCall, metadata = findMatchingCall(stmt)
 			case *ast.DeferStmt:
-				if m, inject := shouldInject(stmt.Call); inject {
-					matchedCall = stmt.Call
-					metadata = m
+				if metadata, inject := shouldInject(stmt.Call); inject {
+					// Special handling for defer: wrap in inline function to preserve semantics
+					pointID, err := m.nextPointId()
+					if err != nil {
+						return err
+					}
+					pointMap[pointID] = metadata
+
+					// Build instrumentation for the deferred call
+					preStmts, err := buildCallInstrumentationWithArgs(&buf, pointID, stmt.Call, filePackageNames)
+					if err != nil {
+						return err
+					}
+
+					// Wrap in inline function: defer func() { preStmts...; call }()
+					blockList := make([]ast.Stmt, 0, len(preStmts)+1)
+					blockList = append(blockList, preStmts...)
+					// Add the call as the last statement (already modified by buildCallInstrumentationWithArgs)
+					blockList = append(blockList, &ast.ExprStmt{X: stmt.Call})
+
+					// Replace the defer's call with the inline function
+					stmt.Call = &ast.CallExpr{
+						Fun: &ast.FuncLit{
+							Type: &ast.FuncType{Params: &ast.FieldList{}},
+							Body: &ast.BlockStmt{List: blockList},
+						},
+					}
+
+					// Recurse into any FuncLits in the preStmts (extracted arguments).
+					// These contain FuncLits from the original call arguments that may have
+					// target calls inside them. We do this here rather than using
+					// rewriteFuncLitsIn on the whole statement to avoid re-instrumenting
+					// the call we just wrapped.
+					for _, preStmt := range preStmts {
+						if err := rewriteFuncLitsIn(preStmt); err != nil {
+							return err
+						}
+					}
+
+					newStmts = append(newStmts, st)
+					continue // Skip rewriteFuncLitsIn on the whole statement
 				}
 			case *ast.GoStmt:
-				if m, inject := shouldInject(stmt.Call); inject {
-					matchedCall = stmt.Call
-					metadata = m
+				if metadata, inject := shouldInject(stmt.Call); inject {
+					// Same transformation as DeferStmt
+					pointID, err := m.nextPointId()
+					if err != nil {
+						return err
+					}
+					pointMap[pointID] = metadata
+
+					preStmts, err := buildCallInstrumentationWithArgs(&buf, pointID, stmt.Call, filePackageNames)
+					if err != nil {
+						return err
+					}
+
+					blockList := make([]ast.Stmt, 0, len(preStmts)+1)
+					blockList = append(blockList, preStmts...)
+					blockList = append(blockList, &ast.ExprStmt{X: stmt.Call})
+
+					stmt.Call = &ast.CallExpr{
+						Fun: &ast.FuncLit{
+							Type: &ast.FuncType{Params: &ast.FieldList{}},
+							Body: &ast.BlockStmt{List: blockList},
+						},
+					}
+
+					// Recurse into any FuncLits in the preStmts (same as DeferStmt)
+					for _, preStmt := range preStmts {
+						if err := rewriteFuncLitsIn(preStmt); err != nil {
+							return err
+						}
+					}
+
+					newStmts = append(newStmts, st)
+					continue // Skip rewriteFuncLitsIn on the whole statement
 				}
 			case *ast.DeclStmt:
 				// Handle var x = call()
@@ -839,6 +967,13 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 					}
 				}
 			}
+
+			// Recurse into any function literals in this statement.
+			// This handles cases like: callback := func(x) { target(x) }
+			// where target() should be instrumented inside the FuncLit's scope.
+			if err := rewriteFuncLitsIn(st); err != nil {
+				return err
+			}
 		}
 		blk.List = newStmts
 		return nil
@@ -909,7 +1044,22 @@ func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID uint32, call *a
 			continue
 		}
 
-		// Give unnamed expressions a trackable name
+		// SelectorExpr (pkg.Const or obj.Field): capture but don't replace
+		// These often involve implicit type conversions (e.g., syscall.SYS_IOCTL -> uintptr)
+		if sel, ok := origArg.(*ast.SelectorExpr); ok {
+			snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), sel))
+			continue
+		}
+
+		// BasicLit: capture value without creating temp (preserve untyped semantics)
+		if lit, ok := origArg.(*ast.BasicLit); ok {
+			snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), lit))
+			// Don't create synthetic variable - just use the literal directly
+			// This preserves untyped constant semantics
+			continue
+		}
+
+		// Complex expressions: create synthetic variable and replace
 		argVarName := fmt.Sprintf("%s%d_%d", syntheticFieldNamePrefixArg, pointID, i)
 		argIdent := ast.NewIdent(argVarName)
 		stmts = append(stmts, &ast.AssignStmt{
@@ -917,13 +1067,7 @@ func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID uint32, call *a
 			Tok: token.DEFINE,
 			Rhs: []ast.Expr{origArg},
 		})
-
-		// Literals: keep in call to preserve untyped semantics
-		// Complex expressions: replace with temp to avoid double evaluation
-		if _, isLiteral := origArg.(*ast.BasicLit); !isLiteral {
-			call.Args[i] = argIdent
-		}
-
+		call.Args[i] = argIdent
 		snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), argIdent))
 	}
 
@@ -1101,7 +1245,13 @@ func buildReturnInstrumentation(buf *bytes.Buffer, ret *ast.ReturnStmt, pointID 
 	var newResults []ast.Expr
 	allNamed := len(funcResultNames) > 0 && !slices.Contains(funcResultNames, "")
 	if len(ret.Results) == 0 && allNamed {
+		hasBlankReturn := false
 		for _, name := range funcResultNames {
+			// Skip blank identifiers - they can't be used as values
+			if name == "_" {
+				hasBlankReturn = true
+				continue
+			}
 			id := ident(name)
 			if !seen[name] {
 				snaps = append(snaps, makeSnapshotLit(name, id))
@@ -1113,8 +1263,13 @@ func buildReturnInstrumentation(buf *bytes.Buffer, ret *ast.ReturnStmt, pointID 
 		if err != nil {
 			return nil, err
 		}
+		// If any return is a blank identifier, use bare return to preserve semantics
+		retStmt := &ast.ReturnStmt{Results: newResults}
+		if hasBlankReturn {
+			retStmt = &ast.ReturnStmt{}
+		}
 		return &ast.BlockStmt{
-			List: append(append(preStmts, sendStmt), &ast.ReturnStmt{Results: newResults}),
+			List: append(append(preStmts, sendStmt), retStmt),
 		}, nil
 	}
 	// special-case: one CallExpr returning multiple values
@@ -1295,6 +1450,115 @@ func buildReturnInstrumentation(buf *bytes.Buffer, ret *ast.ReturnStmt, pointID 
 	}, nil
 }
 
+// zeroValueForType generates a zero value AST expression for the given type expression.
+// buf is used for cloning type expressions when needed.
+func zeroValueForType(buf *bytes.Buffer, typ ast.Expr) (ast.Expr, error) {
+	switch t := typ.(type) {
+	case *ast.Ident:
+		switch t.Name {
+		// Numeric types
+		case "int", "int8", "int16", "int32", "int64",
+			"uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+			"float32", "float64", "complex64", "complex128", "byte", "rune":
+			return &ast.BasicLit{Kind: token.INT, Value: "0"}, nil
+		case "bool":
+			return ast.NewIdent("false"), nil
+		case "string":
+			return &ast.BasicLit{Kind: token.STRING, Value: `""`}, nil
+		case "error":
+			// error is an interface
+			return ast.NewIdent("nil"), nil
+		case "_":
+			// Blank identifier cannot be used as a value
+			// This shouldn't happen since we filter out blank identifiers earlier
+			// But if it does, return nil as a safe default
+			return ast.NewIdent("nil"), nil
+		default:
+			// For named types, we face a dilemma:
+			// - We can't use *new(T) as it might conflict with package names
+			// - We can't use (T){} as Go doesn't allow parenthesized types in composite literals
+			// - We can't use T(0) as it only works for numeric types
+			//
+			// Best compromise: Use T{} and accept that it might fail for types
+			// that conflict with package names. This is relatively rare and the
+			// compilation error will be clear when it happens.
+			clonedType, err := cloneExprNoPos(buf, t)
+			if err != nil {
+				return nil, err
+			}
+			return &ast.CompositeLit{Type: clonedType}, nil
+		}
+
+	// Pointer, map, channel, function, and interface types all have nil zero value
+	case *ast.StarExpr,
+		*ast.MapType,
+		*ast.ChanType,
+		*ast.FuncType,
+		*ast.InterfaceType:
+		return ast.NewIdent("nil"), nil
+
+	case *ast.ArrayType:
+		// In the go/ast package, *ast.ArrayType represents both arrays and slices:
+		// Len == nil => slice type ([]T), Len != nil => array type ([N]T).
+		if t.Len == nil {
+			// Slice type: zero value is nil.
+			return ast.NewIdent("nil"), nil
+		}
+		// Array type: zero value is [N]T{}.
+		clonedType, err := cloneExprNoPos(buf, t)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CompositeLit{Type: clonedType}, nil
+
+	case *ast.StructType:
+		// Anonymous struct: struct{...}{}.
+		clonedType, err := cloneExprNoPos(buf, t)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CompositeLit{Type: clonedType}, nil
+
+	case *ast.SelectorExpr:
+		// pkg.Type - use composite literal
+		clonedType, err := cloneExprNoPos(buf, t)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CompositeLit{Type: clonedType}, nil
+
+	case *ast.IndexExpr:
+		// Generic type with single param: T[U] - use *new(T[U])
+		clonedType, err := cloneExprNoPos(buf, t)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.StarExpr{X: &ast.CallExpr{
+			Fun:  ast.NewIdent("new"),
+			Args: []ast.Expr{clonedType},
+		}}, nil
+
+	case *ast.IndexListExpr:
+		// Generic type with multiple params: T[K, V] - use *new(T[K,V])
+		clonedType, err := cloneExprNoPos(buf, t)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.StarExpr{X: &ast.CallExpr{
+			Fun:  ast.NewIdent("new"),
+			Args: []ast.Expr{clonedType},
+		}}, nil
+
+	default:
+		// Fallback: use composite literal for any type
+		clonedType, err := cloneExprNoPos(buf, typ)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CompositeLit{Type: clonedType}, nil
+	}
+}
+
 // cloneExprNoPos is a helper to clone an AST, dropping positions.
 func cloneExprNoPos(buf *bytes.Buffer, e ast.Node) (ast.Expr, error) {
 	buf.Reset()
@@ -1400,21 +1664,74 @@ func makeReturnTemp(namePrefix string, i int, expr ast.Expr, typ ast.Expr) (retI
 			}}},
 		}
 	} else {
-		// Use var tmpX Type = expr (not tmpX := expr) to allow untyped constants to convert to named types
+		// Check if any identifier in expr might shadow a type name used in typ
+		// Examples:
+		// - expr = Ident("deviceFlowResponse"), typ = *deviceFlowResponse
+		// - expr = UnaryExpr(&Ident("deviceFlowResponse")), typ = *deviceFlowResponse
+		// - expr = SelectorExpr(obj.field), typ = *SomeType
+		typeMightBeShadowed := exprContainsTypeShadow(expr, typ)
+
 		tmpId := ast.NewIdent(syntheticFieldNamePrefixTemp + iStr)
-		stmts = []ast.Stmt{
-			// var tmpX Type = expr (typed temp for monitoring, allows conversion)
-			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
-				&ast.ValueSpec{Names: []*ast.Ident{tmpId}, Type: typ, Values: []ast.Expr{expr}},
-			}}},
-			// var retX Type = tmpX (typed return variable)
-			&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
-				&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{tmpId}},
-			}}},
+		if typeMightBeShadowed {
+			// Use := to avoid type shadowing issues
+			stmts = []ast.Stmt{
+				// tmpX := expr (use type inference to avoid shadowing)
+				&ast.AssignStmt{
+					Lhs: []ast.Expr{tmpId},
+					Tok: token.DEFINE,
+					Rhs: []ast.Expr{expr},
+				},
+				// retX := tmpX (use type inference)
+				&ast.AssignStmt{
+					Lhs: []ast.Expr{retId},
+					Tok: token.DEFINE,
+					Rhs: []ast.Expr{tmpId},
+				},
+			}
+		} else {
+			// Use var tmpX Type = expr to allow untyped constants to convert to named types
+			stmts = []ast.Stmt{
+				// var tmpX Type = expr (typed temp for monitoring, allows conversion)
+				&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
+					&ast.ValueSpec{Names: []*ast.Ident{tmpId}, Type: typ, Values: []ast.Expr{expr}},
+				}}},
+				// var retX Type = tmpX (typed return variable)
+				&ast.DeclStmt{Decl: &ast.GenDecl{Tok: token.VAR, Specs: []ast.Spec{
+					&ast.ValueSpec{Names: []*ast.Ident{retId}, Type: typ, Values: []ast.Expr{tmpId}},
+				}}},
+			}
 		}
 	}
 	snap = makeSnapshotLit(retId.Name, retId)
 	return
+}
+
+// exprContainsTypeShadow checks if any identifier in expr might shadow a type name in typ.
+// For example, if expr contains identifier "deviceFlowResponse" and typ is "*deviceFlowResponse",
+// then a variable named "deviceFlowResponse" would shadow the type name.
+func exprContainsTypeShadow(expr ast.Expr, typ ast.Expr) bool {
+	// Collect all identifiers from the type expression
+	typeIdents := make(map[string]bool)
+	ast.Inspect(typ, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			typeIdents[ident.Name] = true
+		}
+		return true
+	})
+
+	// Check if any identifier in expr matches a type identifier
+	foundShadow := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			if typeIdents[ident.Name] {
+				foundShadow = true
+				return false
+			}
+		}
+		return true
+	})
+
+	return foundShadow
 }
 
 // isRecursiveCall reports whether expr is a direct call to the function itself.
