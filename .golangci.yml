@@ -33,16 +33,15 @@ linters:
     - unconvert
     - wastedassign
     - whitespace
+  settings:
+    goconst:
+      min-len: 4
+      min-occurrences: 4
 
 formatters:
   enable:
     - gofmt
     - goimports
-
-linters-settings:
-  goconst:
-    min-len: 4
-    min-occurrences: 4
 
 run:
   timeout: 600s
