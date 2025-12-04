@@ -324,7 +324,7 @@ func (lr *lensReader) readStackFrames() ([]LensMonitorStackFrame, error) {
 	}
 	stringTable := make([]string, tableSize)
 	for i := uint64(0); i < tableSize; i++ {
-		if stringTable[i], err = lr.readStringUnbounded(); err != nil {
+		if stringTable[i], err = lr.readString(); err != nil {
 			return nil, err
 		}
 	}
@@ -544,28 +544,14 @@ func (lr *lensReader) readString() (string, error) {
 	length, err := lr.readVarint()
 	if err != nil || length == 0 {
 		return "", err
-	} else if length > uint64(lr.maxFieldLen) {
-		return "", fmt.Errorf("string length %d exceeds maximum %d", length, lr.maxFieldLen)
+	} else if length > math.MaxUint32 {
+		return "", fmt.Errorf("string length %d exceeds maximum %d", length, math.MaxUint32)
 	}
 	buf := make([]byte, length)
 	if _, err := io.ReadFull(lr.r, buf); err != nil {
 		return "", err
 	}
 	// Zero-copy string conversion - safe because buf is not reused after this
-	return unsafe.String(&buf[0], len(buf)), nil
-}
-
-func (lr *lensReader) readStringUnbounded() (string, error) {
-	length, err := lr.readVarint()
-	if err != nil || length == 0 {
-		return "", err
-	} else if length > math.MaxUint32 {
-		return "", fmt.Errorf("string length %d exceeds maximum", length)
-	}
-	buf := make([]byte, length)
-	if _, err := io.ReadFull(lr.r, buf); err != nil {
-		return "", err
-	}
 	return unsafe.String(&buf[0], len(buf)), nil
 }
 

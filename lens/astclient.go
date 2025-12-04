@@ -395,7 +395,7 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 
 	default:
 		lw.writeByte(lensTypeTagString)
-		lw.writeString(fmt.Sprint(v.Interface()))
+		lw.writeString(limitLensMonitorStringSize(fmt.Sprint(v.Interface())))
 	}
 }
 
