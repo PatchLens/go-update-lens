@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/go-analyze/charts"
 )
 
@@ -121,8 +122,10 @@ func PrepareReportData(changedModules []*ModuleChange, projectCallingFunctions [
 		relevantProjectFunctionMap[f.FunctionIdent] = true
 	}
 
-	relevantProjectFunctionIdents = slices.Sorted(maps.Keys(relevantProjectFunctionMap))
-	reachableModuleFunctionsIdents = slices.Sorted(maps.Keys(reachableModuleFunctionMap))
+	relevantProjectFunctionIdents = bulk.MapKeysSlice(relevantProjectFunctionMap)
+	slices.Sort(relevantProjectFunctionIdents)
+	reachableModuleFunctionsIdents = bulk.MapKeysSlice(reachableModuleFunctionMap)
+	slices.Sort(reachableModuleFunctionsIdents)
 
 	relevantTestFunctionsIdents = make([]string, len(relevantTestFunctions))
 	for i := range relevantTestFunctions {

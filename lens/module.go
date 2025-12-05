@@ -8,7 +8,6 @@ import (
 	"go/printer"
 	"io/fs"
 	"log"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -395,7 +394,8 @@ func parseGoWork(workPath string) ([]string, error) {
 		}
 	}
 
-	out := slices.Sorted(maps.Keys(seen))
+	out := bulk.MapKeysSlice(seen)
+	slices.Sort(out)
 	return out, nil
 }
 
@@ -498,7 +498,8 @@ func ProjectGoModFiles(projectDir string) ([]string, error) {
 		}
 	}
 
-	result := slices.Sorted(maps.Keys(modSet))
+	result := bulk.MapKeysSlice(modSet)
+	slices.Sort(result)
 	return result, nil
 }
 

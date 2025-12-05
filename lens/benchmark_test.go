@@ -471,7 +471,7 @@ func BenchmarkTestResultDecode(b *testing.B) {
 	}
 }
 
-func BenchmarkTestResultEncodeBaseline1(b *testing.B) {
+func BenchmarkTestResultEncodeBaseline(b *testing.B) {
 	tr := benchTestResult()
 	baselineTR := baselineTestResult{
 		TestFunction:     tr.TestFunction,

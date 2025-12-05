@@ -3,7 +3,6 @@ package lens
 import (
 	"fmt"
 	"log"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/go-analyze/bulk"
 )
 
 const debugMutationTesting = false
@@ -232,9 +233,8 @@ func buildExecSelectTestsScript(fileToTests map[string][]string, packages []stri
 		return "", err
 	}
 
-	// Sort keys for reproducible output (in case of inter-test interactions)
-	keys := slices.Sorted(maps.Keys(fileToTests))
-
+	keys := bulk.MapKeysSlice(fileToTests)
+	slices.Sort(keys) // Sort keys for reproducible output
 	// Populate the associative array
 	for _, fp := range keys {
 		tests := fileToTests[fp]

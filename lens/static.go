@@ -7,7 +7,6 @@ import (
 	"go/build"
 	"go/token"
 	"go/types"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -112,7 +111,7 @@ func CallerStaticAnalysis(moduleChanges []*ModuleFunction, projectDir, gopath, g
 		return nil, nil, nil, nil, nil, err
 	}
 
-	result := slices.Collect(maps.Values(callerFuncMap))
+	result := bulk.MapValuesSlice(callerFuncMap)
 	// build a map for module functions which are actually reachable
 	reachableModuleChanges := make(ReachableModuleChange)
 	for _, cf := range result {
@@ -280,7 +279,7 @@ func TestStaticAnalysis(callers []*CallerFunction, projectDir, gopath, gomodcach
 		return nil, err
 	}
 
-	return slices.Collect(maps.Values(testFuncMap)), nil
+	return bulk.MapValuesSlice(testFuncMap), nil
 }
 
 // TODO - FUTURE - replace CHA with https://pkg.go.dev/golang.org/x/tools/go/analysis

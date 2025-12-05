@@ -18,6 +18,7 @@ type baselineTestResult struct {
 	ModulePanics     map[string][]string    `msgpack:"mp,omitempty"`
 	ModuleChangesHit int                    `msgpack:"mh"`
 	TestFailure      bool                   `msgpack:"fail"`
+	ExtensionFrames  map[string][]CallFrame `msgpack:"ext"`
 }
 
 func encodeBaseline(tr *TestResult) ([]byte, error) {
@@ -28,6 +29,7 @@ func encodeBaseline(tr *TestResult) ([]byte, error) {
 		ModulePanics:     tr.ModulePanics,
 		ModuleChangesHit: tr.ModuleChangesHit,
 		TestFailure:      tr.TestFailure,
+		ExtensionFrames:  tr.ExtensionFrames,
 	}
 	return msgpack.Marshal(simple)
 }
@@ -418,8 +420,6 @@ func TestTestResultMsgpackEncoding(t *testing.T) {
 		lowDuplicationTestResult.CallerResults[callerName] = frames
 	}
 
-	// =================== TEST CASES ===================
-
 	t.Run("basic", func(t *testing.T) {
 		t.Parallel()
 
@@ -716,12 +716,12 @@ func TestTestResultMsgpackEncoding(t *testing.T) {
 			{
 				name:          "Basic",
 				testResult:    basicTestResult,
-				expectedRatio: 1.0,
+				expectedRatio: 1.02,
 			},
 			{
 				name:          "LogicalDeduplication",
 				testResult:    logicalDeduplicationTestResult,
-				expectedRatio: 1.29,
+				expectedRatio: 1.3,
 			},
 		}
 

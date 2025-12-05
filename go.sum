@@ -10,8 +10,8 @@ github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da h1:aIftn67I1fkbMa5
 github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da/go.mod h1:SqUrOPUnsFjfmXRMNPybcSiG0BgUW2AuFH8PAnS2iTw=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
-github.com/go-analyze/bulk v0.1.1 h1:NkUzpMit23vsDIwM3t4crOnTh3a1Bp5IgKiTf582K5o=
-github.com/go-analyze/bulk v0.1.1/go.mod h1:afon/KtFJYnekIyN20H/+XUvcLFjE8sKR1CfpqfClgM=
+github.com/go-analyze/bulk v0.1.2 h1:1PyutLsD0jmMfQ/BKb86YSefB3GS/FNJYyAckIpwSpY=
+github.com/go-analyze/bulk v0.1.2/go.mod h1:afon/KtFJYnekIyN20H/+XUvcLFjE8sKR1CfpqfClgM=
 github.com/go-analyze/charts v0.5.21 h1:kzsfvPiVvAPcNLtxUN4Rj8vXqz8sl3TiZrTOa1hcQfk=
 github.com/go-analyze/charts v0.5.21/go.mod h1:zukR151ymTK87fxZbnW0KquNGtS0QlRkV+LCDEbbHgE=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=

@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/go-analyze/bulk"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -617,7 +617,8 @@ func (fv FieldValues) ID() string {
 	hash := sha1.New()
 	var walk func(cur FieldValues)
 	walk = func(cur FieldValues) {
-		sortedKeys := slices.Sorted(maps.Keys(cur))
+		sortedKeys := bulk.MapKeysSlice(cur)
+		slices.Sort(sortedKeys)
 		for _, key := range sortedKeys {
 			hash.Write([]byte(key))
 			fv := cur[key]

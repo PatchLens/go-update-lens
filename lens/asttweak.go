@@ -15,7 +15,6 @@ import (
 	"go/token"
 	"go/types"
 	"io/fs"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/go-analyze/bulk"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -254,7 +254,7 @@ func detectPackageName(dir string) (string, error) {
 	} else if len(pkgs) == 0 {
 		return "", fmt.Errorf("no non-test or main packages found in %s", dir)
 	}
-	pkgNames := slices.Collect(maps.Keys(pkgs))
+	pkgNames := bulk.MapKeysSlice(pkgs)
 	if len(pkgNames) > 1 {
 		return "", fmt.Errorf("multiple packages found in %s: %v", dir, pkgNames)
 	}
@@ -1100,7 +1100,7 @@ func buildTypesInfo(fset *token.FileSet, targetFile *ast.File) *types.Info {
 		return nil
 	}
 	// There should be exactly one non-test package in this directory
-	pkgFiles := slices.Collect(maps.Values(pkgs[targetFile.Name.Name].Files))
+	pkgFiles := bulk.MapValuesSlice(pkgs[targetFile.Name.Name].Files)
 	files := make([]*ast.File, 0, len(pkgFiles))
 	targetPath := fset.File(targetFile.Pos()).Name()
 	for _, f := range pkgFiles {
@@ -1217,9 +1217,11 @@ func visibleDeclsBefore(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
 		return true
 	})
 
-	return slices.SortedFunc(maps.Values(latest), func(a, b declInfo) int {
+	result := bulk.MapValuesSlice(latest)
+	slices.SortFunc(result, func(a, b declInfo) int {
 		return cmp.Compare(a.pos, b.pos)
 	})
+	return result
 }
 
 // buildReturnInstrumentation inserts instrumentation around an explicit return. All nodes that originate

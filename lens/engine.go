@@ -420,8 +420,8 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 		callerTimeChanges := make(map[string]PerformanceTimeChange)
 		var testSameCount, testDiffCount, testRegressionCount int
 		// iterate sorted idents in case we want to compare across runs
-		sortedIdents := slices.Sorted(maps.Keys(preResults.CallerResults))
-
+		sortedIdents := bulk.MapKeysSlice(preResults.CallerResults)
+		slices.Sort(sortedIdents)
 		var bb bytes.Buffer
 		for _, callerIdent := range sortedIdents {
 			frames := preResults.CallerResults[callerIdent]
@@ -799,8 +799,8 @@ func (e *AnalysisEngine) Run() error {
 			return fmt.Errorf("error analyzing changes %w", err)
 		}
 
-		checkedModuleNames = slices.Sorted(maps.Keys(moduleToFuncs))
-
+		checkedModuleNames = bulk.MapKeysSlice(moduleToFuncs)
+		slices.Sort(checkedModuleNames)
 		for _, modName := range checkedModuleNames { // iterate over sorted checkedModuleNames for determinism
 			moduleChanges = append(moduleChanges, moduleToFuncs[modName]...)
 		}

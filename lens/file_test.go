@@ -2,13 +2,13 @@ package lens
 
 import (
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
 
+	"github.com/go-analyze/bulk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -154,7 +154,7 @@ func TestCopyDir(t *testing.T) {
 	dstFiles, err := collectFiles(dstDir)
 	require.NoError(t, err)
 	require.Len(t, dstFiles, len(files))
-	dstContents := slices.Collect(maps.Values(dstFiles))
+	dstContents := bulk.MapValuesSlice(dstFiles)
 	for _, v := range files {
 		assert.True(t, slices.Contains(dstContents, v))
 	}

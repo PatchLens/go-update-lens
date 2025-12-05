@@ -79,7 +79,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	projectFieldChecks1, moduleChangesReached, err :=
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			nil, preStorage,
-			slices.Collect(maps.Values(reachableModuleChanges)), callingFunctions, testFunctions, preUpdateExtensionConfig, nil)
+			bulk.MapValuesSlice(reachableModuleChanges), callingFunctions, testFunctions, preUpdateExtensionConfig, nil)
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, nil, nil, err
 	}

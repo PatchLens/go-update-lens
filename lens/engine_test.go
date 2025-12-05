@@ -2,14 +2,13 @@ package lens
 
 import (
 	"errors"
-	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/packages"
@@ -1584,7 +1583,7 @@ func TestAnalyzeModuleChanges_PostModuleAnalysis(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, receivedData, 1)
 
-		data := slices.Collect(maps.Keys(receivedData))
+		data := bulk.MapKeysSlice(receivedData)
 		require.Len(t, data, 1)
 		// ChangedFunctions should only have Foo (Bar is unchanged)
 		require.Len(t, receivedData[data[0]], 1)
