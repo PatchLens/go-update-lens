@@ -2,8 +2,10 @@ package lens
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -368,6 +370,187 @@ func TestStreamField(t *testing.T) {
 		assert.Equal(t, "[]uint16", decoded.Type)
 		// uint16 slices are normalized to []uint32
 		assert.Equal(t, []uint32{1, 2, math.MaxUint16}, decoded.Value)
+	})
+
+	t.Run("map_exceeds_limit_string_keys", func(t *testing.T) {
+		// Create a map with more entries than lensMonitorFieldMaxLen
+		size := lensMonitorFieldMaxLen + 500
+		val := make(map[string]int, size)
+		for i := 0; i < size; i++ {
+			val[fmt.Sprintf("key%05d", i)] = i
+		}
+
+		var buf bytes.Buffer
+		lw := &lensMsgEncoder{w: &buf}
+		lw.streamField("largemap", reflect.ValueOf(val), 0, nil, "")
+		decoded := LensMonitorField{}
+		err := newLensReader(&buf, lensMonitorFieldMaxLen).readField(&decoded)
+		require.NoError(t, err)
+
+		// Should be limited to lensMonitorFieldMaxLen entries
+		require.Len(t, decoded.Children, lensMonitorFieldMaxLen)
+
+		// Keys should be sorted (first key should be "key00000")
+		assert.Equal(t, "key00000", decoded.Children[0].Name)
+		assert.Equal(t, "key00001", decoded.Children[1].Name)
+		// Last key in sorted order up to limit
+		assert.Equal(t, fmt.Sprintf("key%05d", lensMonitorFieldMaxLen-1), decoded.Children[lensMonitorFieldMaxLen-1].Name)
+	})
+
+	t.Run("map_exceeds_limit_int_keys", func(t *testing.T) {
+		size := lensMonitorFieldMaxLen + 200
+		val := make(map[int]string, size)
+		for i := 0; i < size; i++ {
+			val[i] = fmt.Sprintf("value%d", i)
+		}
+
+		var buf bytes.Buffer
+		lw := &lensMsgEncoder{w: &buf}
+		lw.streamField("intmap", reflect.ValueOf(val), 0, nil, "")
+		decoded := LensMonitorField{}
+		err := newLensReader(&buf, lensMonitorFieldMaxLen).readField(&decoded)
+		require.NoError(t, err)
+
+		require.Len(t, decoded.Children, lensMonitorFieldMaxLen)
+
+		// Keys should be sorted numerically (0, 1, 2, ...)
+		assert.Equal(t, "0", decoded.Children[0].Name)
+		assert.Equal(t, "1", decoded.Children[1].Name)
+		assert.Equal(t, strconv.Itoa(lensMonitorFieldMaxLen-1), decoded.Children[lensMonitorFieldMaxLen-1].Name)
+	})
+
+	t.Run("map_deterministic_on_repeat", func(t *testing.T) {
+		// Verify encoding is deterministic for large maps
+		size := lensMonitorFieldMaxLen + 100
+		val := make(map[int]int, size)
+		for i := 0; i < size; i++ {
+			val[i] = i * 2
+		}
+
+		// Encode twice
+		var buf1, buf2 bytes.Buffer
+		lw1 := &lensMsgEncoder{w: &buf1}
+		lw1.streamField("map", reflect.ValueOf(val), 0, nil, "")
+		lw2 := &lensMsgEncoder{w: &buf2}
+		lw2.streamField("map", reflect.ValueOf(val), 0, nil, "")
+
+		// Should produce identical output
+		assert.Equal(t, buf1.Bytes(), buf2.Bytes())
+	})
+}
+
+func TestLensCompareReflectValue(t *testing.T) {
+	t.Parallel()
+
+	t.Run("string_comparison", func(t *testing.T) {
+		a := reflect.ValueOf("apple")
+		b := reflect.ValueOf("banana")
+		c := reflect.ValueOf("apple")
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b))
+		assert.Equal(t, 1, lensCompareReflectValue(b, a))
+		assert.Equal(t, 0, lensCompareReflectValue(a, c))
+	})
+
+	t.Run("int_comparison", func(t *testing.T) {
+		a := reflect.ValueOf(10)
+		b := reflect.ValueOf(20)
+		c := reflect.ValueOf(10)
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b))
+		assert.Equal(t, 1, lensCompareReflectValue(b, a))
+		assert.Equal(t, 0, lensCompareReflectValue(a, c))
+	})
+
+	t.Run("uint_comparison", func(t *testing.T) {
+		a := reflect.ValueOf(uint(5))
+		b := reflect.ValueOf(uint(15))
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b))
+		assert.Equal(t, 1, lensCompareReflectValue(b, a))
+	})
+
+	t.Run("float_comparison", func(t *testing.T) {
+		a := reflect.ValueOf(1.5)
+		b := reflect.ValueOf(2.5)
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b))
+		assert.Equal(t, 1, lensCompareReflectValue(b, a))
+	})
+
+	t.Run("bool_comparison", func(t *testing.T) {
+		f := reflect.ValueOf(false)
+		tr := reflect.ValueOf(true)
+
+		assert.Equal(t, -1, lensCompareReflectValue(f, tr))
+		assert.Equal(t, 1, lensCompareReflectValue(tr, f))
+		assert.Equal(t, 0, lensCompareReflectValue(f, f))
+		assert.Equal(t, 0, lensCompareReflectValue(tr, tr))
+	})
+
+	t.Run("complex_comparison", func(t *testing.T) {
+		a := reflect.ValueOf(complex(1, 2))
+		b := reflect.ValueOf(complex(1, 3))
+		c := reflect.ValueOf(complex(2, 1))
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b)) // same real, smaller imag
+		assert.Equal(t, -1, lensCompareReflectValue(a, c)) // smaller real
+		assert.Equal(t, 0, lensCompareReflectValue(a, a))
+	})
+
+	t.Run("pointer_comparison", func(t *testing.T) {
+		x, y := 1, 2
+		a := reflect.ValueOf(&x)
+		b := reflect.ValueOf(&y)
+
+		// Pointers compared by address, result depends on allocation order
+		result := lensCompareReflectValue(a, b)
+		assert.NotEqual(t, 0, result)
+		assert.Equal(t, 0, lensCompareReflectValue(a, a))
+	})
+
+	t.Run("array_comparison", func(t *testing.T) {
+		a := reflect.ValueOf([3]int{1, 2, 3})
+		b := reflect.ValueOf([3]int{1, 2, 4})
+		c := reflect.ValueOf([3]int{1, 2, 3})
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b))
+		assert.Equal(t, 1, lensCompareReflectValue(b, a))
+		assert.Equal(t, 0, lensCompareReflectValue(a, c))
+	})
+
+	t.Run("struct_comparison", func(t *testing.T) {
+		type point struct {
+			X, Y int
+		}
+		a := reflect.ValueOf(point{1, 2})
+		b := reflect.ValueOf(point{1, 3})
+		c := reflect.ValueOf(point{2, 1})
+		d := reflect.ValueOf(point{1, 2})
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b)) // same X, smaller Y
+		assert.Equal(t, -1, lensCompareReflectValue(a, c)) // smaller X
+		assert.Equal(t, 0, lensCompareReflectValue(a, d))
+	})
+
+	t.Run("nested_struct_comparison", func(t *testing.T) {
+		type inner struct{ V int }
+		type outer struct{ I inner }
+
+		a := reflect.ValueOf(outer{inner{1}})
+		b := reflect.ValueOf(outer{inner{2}})
+
+		assert.Equal(t, -1, lensCompareReflectValue(a, b))
+		assert.Equal(t, 1, lensCompareReflectValue(b, a))
+	})
+
+	t.Run("interface_comparison", func(t *testing.T) {
+		var a, b interface{} = 10, 20
+		var nilA, nilB interface{}
+
+		assert.Equal(t, -1, lensCompareReflectValue(reflect.ValueOf(&a).Elem(), reflect.ValueOf(&b).Elem()))
+		assert.Equal(t, 0, lensCompareReflectValue(reflect.ValueOf(&nilA).Elem(), reflect.ValueOf(&nilB).Elem()))
+		assert.Equal(t, -1, lensCompareReflectValue(reflect.ValueOf(&nilA).Elem(), reflect.ValueOf(&a).Elem()))
 	})
 }
 

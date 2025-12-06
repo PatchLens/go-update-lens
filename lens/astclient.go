@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -361,9 +362,19 @@ func (lw *lensMsgEncoder) streamField(name string, v reflect.Value, depth int, v
 	case reflect.Map:
 		lw.writeByte(lensTypeTagMap)
 		keys := v.MapKeys()
-		lw.writeVarint(uint64(len(keys)))
-		for _, k := range keys {
-			lw.streamField(fmt.Sprint(k.Interface()), v.MapIndex(k), depth+1, visited, valuePath)
+		if len(keys) <= lensMonitorFieldMaxLen {
+			// Fast path, size within limit, use undeterministic iteration order
+			lw.writeVarint(uint64(len(keys)))
+			for _, k := range keys {
+				lw.streamField(fmt.Sprint(k.Interface()), v.MapIndex(k), depth+1, visited, valuePath)
+			}
+		} else { // Too many entries, sort keys for deterministic subset (similar to slices)
+			sort.Slice(keys, func(i, j int) bool { return lensCompareReflectValue(keys[i], keys[j]) < 0 })
+			lw.writeVarint(uint64(lensMonitorFieldMaxLen))
+			for i := 0; i < lensMonitorFieldMaxLen; i++ {
+				k := keys[i]
+				lw.streamField(fmt.Sprint(k.Interface()), v.MapIndex(k), depth+1, visited, valuePath)
+			}
 		}
 
 	case reflect.Struct:
@@ -503,6 +514,130 @@ func (lw *lensMsgEncoder) streamValueSlice(v reflect.Value, vType reflect.Type, 
 		for i := 0; i < length; i++ {
 			lw.streamField("["+strconv.Itoa(i)+"]", v.Index(i), depth+1, visited, valuePath)
 		}
+	}
+}
+
+// lensCompareReflectValue compares two reflect.Value keys for sorting.
+// Keys in a map are guaranteed to be the same type, so we switch on kind once.
+func lensCompareReflectValue(a, b reflect.Value) int {
+	switch a.Kind() {
+	case reflect.String:
+		as, bs := a.String(), b.String()
+		if as < bs {
+			return -1
+		} else if as > bs {
+			return 1
+		}
+		return 0
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		ai, bi := a.Int(), b.Int()
+		if ai < bi {
+			return -1
+		} else if ai > bi {
+			return 1
+		}
+		return 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		au, bu := a.Uint(), b.Uint()
+		if au < bu {
+			return -1
+		} else if au > bu {
+			return 1
+		}
+		return 0
+	case reflect.Float32, reflect.Float64:
+		af, bf := a.Float(), b.Float()
+		if af < bf {
+			return -1
+		} else if af > bf {
+			return 1
+		}
+		return 0
+	case reflect.Bool:
+		// false < true
+		if a.Bool() == b.Bool() {
+			return 0
+		} else if b.Bool() {
+			return -1
+		}
+		return 1
+	case reflect.Complex64, reflect.Complex128:
+		// Compare real part first, then imaginary
+		ac, bc := a.Complex(), b.Complex()
+		ar, br := real(ac), real(bc)
+		if ar < br {
+			return -1
+		} else if ar > br {
+			return 1
+		}
+		ai, bi := imag(ac), imag(bc)
+		if ai < bi {
+			return -1
+		} else if ai > bi {
+			return 1
+		}
+		return 0
+	case reflect.Pointer, reflect.UnsafePointer:
+		ap, bp := a.Pointer(), b.Pointer()
+		if ap < bp {
+			return -1
+		} else if ap > bp {
+			return 1
+		}
+		return 0
+	case reflect.Array:
+		// Compare element by element
+		for i := 0; i < a.Len(); i++ {
+			if c := lensCompareReflectValue(a.Index(i), b.Index(i)); c != 0 {
+				return c
+			}
+		}
+		return 0
+	case reflect.Struct:
+		// Compare field by field
+		for i := 0; i < a.NumField(); i++ {
+			if c := lensCompareReflectValue(a.Field(i), b.Field(i)); c != 0 {
+				return c
+			}
+		}
+		return 0
+	case reflect.Interface:
+		// Unwrap and compare underlying values
+		if a.IsNil() && b.IsNil() {
+			return 0
+		} else if a.IsNil() {
+			return -1
+		} else if b.IsNil() {
+			return 1
+		}
+		// Different underlying types: compare by type name for consistent ordering
+		if a.Elem().Type() != b.Elem().Type() {
+			at, bt := a.Elem().Type().String(), b.Elem().Type().String()
+			if at < bt {
+				return -1
+			} else if at > bt {
+				return 1
+			}
+			return 0
+		}
+		return lensCompareReflectValue(a.Elem(), b.Elem())
+	case reflect.Chan:
+		ap, bp := a.Pointer(), b.Pointer()
+		if ap < bp {
+			return -1
+		} else if ap > bp {
+			return 1
+		}
+		return 0
+	default:
+		// Fallback for any remaining types: compare string representation
+		as, bs := fmt.Sprint(a.Interface()), fmt.Sprint(b.Interface())
+		if as < bs {
+			return -1
+		} else if as > bs {
+			return 1
+		}
+		return 0
 	}
 }
 

@@ -458,12 +458,24 @@ func (lr *lensReader) readValue() (interface{}, []LensMonitorField, error) {
 	case lensTypeTagStringSlice:
 		v, err := lr.readStringSlice()
 		return v, nil, err
-	case lensTypeTagSlice, lensTypeTagMap, lensTypeTagStruct:
+	case lensTypeTagSlice, lensTypeTagMap:
 		count, err := lr.readVarint()
 		if err != nil {
 			return nil, nil, err
 		} else if count > uint64(lr.maxFieldLen) {
 			return nil, nil, fmt.Errorf("container field count %d exceeds maximum %d", count, lr.maxFieldLen)
+		}
+		children := make([]LensMonitorField, count)
+		for i := uint64(0); i < count; i++ {
+			if err := lr.readField(&children[i]); err != nil {
+				return nil, nil, err
+			}
+		}
+		return nil, children, nil
+	case lensTypeTagStruct:
+		count, err := lr.readVarint()
+		if err != nil {
+			return nil, nil, err
 		}
 		children := make([]LensMonitorField, count)
 		for i := uint64(0); i < count; i++ {
