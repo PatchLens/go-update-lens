@@ -269,7 +269,7 @@ cp "$MUTATE_CHANGED" "$MUTATE_ORIGINAL" || { exit 2; }
 
 # Run only the affected tests
 export MUTATE_TIMEOUT=${MUTATE_TIMEOUT:-30}
-GOMUTESTING_TEST=$(go test -count=1 -timeout=$(printf '%ds' $MUTATE_TIMEOUT) -run "$pattern" $PKGS 2>&1)
+GOMUTESTING_TEST=$(go test -count=1 -failfast -timeout=$(printf '%ds' $MUTATE_TIMEOUT) -run "$pattern" $PKGS 2>&1)
 export GOMUTESTING_RESULT=$?
 
 `); err != nil {
@@ -304,7 +304,7 @@ cp $MUTATE_CHANGED $MUTATE_ORIGINAL || { exit 2; }
 
 export MUTATE_TIMEOUT=${MUTATE_TIMEOUT:-30}
 
-GOMUTESTING_TEST=$(go test -count=1 -timeout=$(printf '%%ds' $MUTATE_TIMEOUT) $PKGS 2>&1)
+GOMUTESTING_TEST=$(go test -count=1 -failfast -timeout=$(printf '%%ds' $MUTATE_TIMEOUT) $PKGS 2>&1)
 export GOMUTESTING_RESULT=$?
 
 ` + scriptFinishCheck
