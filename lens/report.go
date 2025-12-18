@@ -43,6 +43,7 @@ type ModuleMetrics struct {
 	ChangeFuncCount           int      `json:"changed_function_count"`
 	ReachableChangedFunctions []string `json:"reachable_changed_functions"`
 	ReachableChangedFuncCount int      `json:"reachable_changed_function_count"`
+	UntrackedModuleFuncCount  int      `json:"untracked_module_function_count"`
 }
 
 // ValidationMetrics aggregates test and mutation statistics.
@@ -199,7 +200,7 @@ func rootModule(changedModules []*ModuleChange) ModuleChange {
 func BuildReportMap(startTime time.Time,
 	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
 	moduleName, startVersion, changeVersion string,
-	checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
+	checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting, untrackedModuleFuncs int,
 	reachableModuleFunctionsIdents, relevantProjectFunctionIdents []string,
 	projectFieldChecks int,
 	relevantTestFunctionsIdents []string, testFieldSameCount, testFieldDiffCount, syntheticTestFuncCount int,
@@ -220,6 +221,7 @@ func BuildReportMap(startTime time.Time,
 			ChangeFuncCount:           moduleChangeFuncCount,
 			ReachableChangedFunctions: reachableModuleFunctionsIdents,
 			ReachableChangedFuncCount: len(reachableModuleFunctionsIdents),
+			UntrackedModuleFuncCount:  untrackedModuleFuncs,
 		},
 		Validation: ValidationMetrics{
 			RelevantProjectFunctions:   relevantProjectFunctionIdents,
@@ -272,7 +274,7 @@ func (rm ReportMap) WriteToFile(path string) error {
 func writeReportJSON(path string, startTime time.Time,
 	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
 	moduleName, startVersion, changeVersion string,
-	checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
+	checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting, untrackedModuleFuncs int,
 	reachableModuleFunctionsIdents, relevantProjectFunctionIdents []string,
 	projectFieldChecks int,
 	relevantTestFunctionsIdents []string, testFieldSameCount, testFieldDiffCount, syntheticTestFuncCount int,
@@ -281,7 +283,7 @@ func writeReportJSON(path string, startTime time.Time,
 	reportMap, err := BuildReportMap(startTime,
 		analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration,
 		moduleName, startVersion, changeVersion, checkedModules, moduleChangeFuncCount,
-		moduleChangesReachedInTesting, reachableModuleFunctionsIdents, relevantProjectFunctionIdents,
+		moduleChangesReachedInTesting, untrackedModuleFuncs, reachableModuleFunctionsIdents, relevantProjectFunctionIdents,
 		projectFieldChecks, relevantTestFunctionsIdents, testFieldSameCount, testFieldDiffCount,
 		syntheticTestFuncCount, globalMutations, performanceChanges, testDetails)
 	if err != nil {
@@ -349,7 +351,7 @@ func RenderReportChartsFromJson(report ReportMetrics) ([]byte, error) {
 	return renderReportCharts(painterOpt,
 		report.Module.RootModuleName, report.Module.RootModuleStartVersion, report.Module.RootModuleUpdateVersion,
 		report.Module.ChangeFuncCount, report.Module.ReachableChangedFuncCount,
-		report.Validation.ModuleChangeHitInTestCount,
+		report.Validation.ModuleChangeHitInTestCount, report.Module.UntrackedModuleFuncCount,
 		report.Validation.TestFieldMatchCount, report.Validation.TestFieldDiffCount,
 		testResults, MutationResult{
 			MutationCount: report.Validation.MutationCount,
@@ -358,7 +360,7 @@ func RenderReportChartsFromJson(report ReportMetrics) ([]byte, error) {
 }
 
 func writeReportCharts(path string, moduleName, startVersion, changeVersion string,
-	moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting,
+	moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 	testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
 	globalMutations MutationResult) error {
 	var outputType string
@@ -378,7 +380,7 @@ func writeReportCharts(path string, moduleName, startVersion, changeVersion stri
 		Height:       1024,
 	}
 	if buf, err := renderReportCharts(painterOpt, moduleName, startVersion, changeVersion,
-		moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting,
+		moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 		testFieldSameCount, testFieldDiffCount, testResults, globalMutations); err != nil {
 		return fmt.Errorf("render charts failed: %w", err)
 	} else if err = os.WriteFile(path, buf, 0644); err != nil {
@@ -388,12 +390,12 @@ func writeReportCharts(path string, moduleName, startVersion, changeVersion stri
 }
 
 func renderReportCharts(painterOpt charts.PainterOptions, moduleName, startVersion, changeVersion string,
-	moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting,
+	moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 	testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
 	globalMutations MutationResult) ([]byte, error) {
 	p := charts.NewPainter(painterOpt)
 	if chartBox, err := renderChartsToPainter(p, moduleName, startVersion, changeVersion,
-		moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting,
+		moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 		testFieldSameCount, testFieldDiffCount, testResults, globalMutations); err != nil {
 		return nil, err
 	} else if chartBox.Height() < p.Height()-128 || chartBox.Height() > p.Height() {
@@ -401,7 +403,7 @@ func renderReportCharts(painterOpt charts.PainterOptions, moduleName, startVersi
 		painterOpt.Height = chartBox.Height()
 		p = charts.NewPainter(painterOpt)
 		if _, err := renderChartsToPainter(p, moduleName, startVersion, changeVersion,
-			moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting,
+			moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 			testFieldSameCount, testFieldDiffCount, testResults, globalMutations); err != nil {
 			return nil, err
 		}
@@ -410,7 +412,7 @@ func renderReportCharts(painterOpt charts.PainterOptions, moduleName, startVersi
 }
 
 func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVersion string,
-	moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting,
+	moduleChangeFuncCount, reachableModuleFunctionCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 	testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
 	globalMutations MutationResult) (charts.Box, error) {
 	// Calculate total performance changes
@@ -515,18 +517,20 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 		Font:      charts.GetDefaultFont(),
 	})
 
+	couldBeValidated := reachableModuleFunctionCount - moduleChangesReachedInTesting - untrackedModuleFuncs
 	topRightOpt := charts.NewHorizontalBarChartOptionWithData([][]float64{
-		{float64(moduleChangesReachedInTesting)},                                // validated
-		{float64(reachableModuleFunctionCount - moduleChangesReachedInTesting)}, // could be validated, but weren't
+		{float64(moduleChangesReachedInTesting)}, // validated
+		{float64(untrackedModuleFuncs)},          // untracked due to old Go version
+		{float64(couldBeValidated)},              // could be validated, but weren't
 	})
 	topRightOpt.StackSeries = charts.Ptr(true)
 	topRightOpt.Theme = barGaugeThemeGreenYellowRed
 	topRightOpt.Title.Text = "Changed Module Function Coverage"
 	topRightOpt.XAxis.Unit = axisUnitForMax(reachableModuleFunctionCount)
 	topRightOpt.YAxis.Show = charts.Ptr(false)
-	topRightOpt.SeriesList[1].Label.Show = charts.Ptr(true)
-	topRightOpt.SeriesList[1].Label.FontStyle.FontColor = firstValueSeriesRankColor(topRightOpt.Theme, topRightOpt.SeriesList)
-	topRightOpt.SeriesList[1].Label.ValueFormatter = func(f float64) string {
+	topRightOpt.SeriesList[2].Label.Show = charts.Ptr(true)
+	topRightOpt.SeriesList[2].Label.FontStyle.FontColor = firstValueSeriesRankColor(topRightOpt.Theme, topRightOpt.SeriesList)
+	topRightOpt.SeriesList[2].Label.ValueFormatter = func(f float64) string {
 		total := float64(reachableModuleFunctionCount)
 		return charts.FormatValueHumanize(100.0*(total-f)/total, 1, false) + "%"
 	}

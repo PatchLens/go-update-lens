@@ -60,14 +60,15 @@ func (m *mockTestProvider) Cleanup() {}
 type mockUpdateAnalysisProvider struct {
 	projectFieldChecks            int
 	moduleChangesReachedInTesting int
+	skippedModuleFuncs            int
 	preResults, postResults       Storage
 	err                           error
 }
 
 func (m *mockUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config, storage Storage,
 	changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
-	return m.projectFieldChecks, m.moduleChangesReachedInTesting, m.preResults, m.postResults, m.err
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, int, Storage, Storage, error) {
+	return m.projectFieldChecks, m.moduleChangesReachedInTesting, m.skippedModuleFuncs, m.preResults, m.postResults, m.err
 }
 
 func (m *mockUpdateAnalysisProvider) Cleanup() {}
@@ -90,7 +91,7 @@ type mockReportWriter struct {
 
 func (m *mockReportWriter) WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
 	analysisTime, testDiscoveryTime, testExecutionTime, mutationTime time.Duration,
-	changedModules []*ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
+	changedModules []*ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting, untrackedModuleFuncs int,
 	projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
 	sameCount, diffCount int, testReports []TestReport,
 	globalMutations MutationResult) error {

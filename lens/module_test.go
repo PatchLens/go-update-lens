@@ -275,10 +275,11 @@ func TestParseGoMod(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name    string
-		content string
-		want    map[string]string
-		wantErr bool
+		name          string
+		content       string
+		want          map[string]string
+		wantGoVersion string
+		wantErr       bool
 	}{
 		{
 			name: "valid_gomod_requires",
@@ -295,7 +296,8 @@ func TestParseGoMod(t *testing.T) {
 				"github.com/foo/bar": "v1.2.3",
 				"github.com/baz/qux": "v0.4.5",
 			},
-			wantErr: false,
+			wantGoVersion: "1.18",
+			wantErr:       false,
 		},
 		{
 			name:    "file not exist",
@@ -320,13 +322,14 @@ func TestParseGoMod(t *testing.T) {
 				require.NoError(t, os.WriteFile(file, []byte(tc.content), 0644))
 			}
 
-			got, err := parseGoMod(file)
+			got, goVersion, err := parseGoMod(file)
 
 			if tc.wantErr {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, tc.want, got)
+				assert.Equal(t, tc.wantGoVersion, goVersion)
 			}
 		})
 	}
@@ -410,13 +413,14 @@ func TestParseProjectDeps(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		rootMod    string
-		work       string
-		modules    map[string]string
-		pickNewest bool
-		want       map[string]string
-		wantErr    bool
+		name          string
+		rootMod       string
+		work          string
+		modules       map[string]string
+		pickNewest    bool
+		want          map[string]string
+		wantGoVersion string
+		wantErr       bool
 	}{
 		{
 			name: "two_modules_prefer_oldest",
@@ -440,6 +444,7 @@ require example.com/bar v0.2.0
 				"example.com/foo": "v1.0.0",
 				"example.com/bar": "v0.2.0",
 			},
+			wantGoVersion: "1.23",
 		},
 		{
 			name: "conflicting_versions_oldest",
@@ -462,6 +467,7 @@ require example.com/foo v1.2.0
 			want: map[string]string{
 				"example.com/foo": "v1.0.0",
 			},
+			wantGoVersion: "1.23",
 		},
 		{
 			name: "conflicting_versions_newest",
@@ -484,6 +490,7 @@ require example.com/foo v1.2.0
 			want: map[string]string{
 				"example.com/foo": "v1.2.0",
 			},
+			wantGoVersion: "1.23",
 		},
 		{
 			name: "root_work_modules_oldest",
@@ -508,6 +515,7 @@ require example.com/foo v1.2.0
 				"example.com/rootdep": "v0.1.0",
 				"example.com/foo":     "v1.0.0",
 			},
+			wantGoVersion: "1.23",
 		},
 		{
 			name: "root_work_modules_newest",
@@ -532,6 +540,31 @@ require example.com/foo v1.2.0
 				"example.com/rootdep": "v0.1.0",
 				"example.com/foo":     "v1.2.0",
 			},
+			wantGoVersion: "1.23",
+		},
+		{
+			name: "mixed_go_versions_returns_oldest",
+			work: "go 1.23\nuse ./m1\nuse ./m2\n",
+			modules: map[string]string{
+				"m1": `module example.com/m1
+
+go 1.18
+
+require example.com/foo v1.0.0
+`,
+				"m2": `module example.com/m2
+
+go 1.21
+
+require example.com/bar v0.2.0
+`,
+			},
+			pickNewest: false,
+			want: map[string]string{
+				"example.com/foo": "v1.0.0",
+				"example.com/bar": "v0.2.0",
+			},
+			wantGoVersion: "1.18",
 		},
 		{
 			name:       "no go.mod or go.work present",
@@ -560,13 +593,14 @@ require example.com/foo v1.2.0
 				require.NoError(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(content), 0o644))
 			}
 
-			deps, err := parseProjectDeps(dir, tc.pickNewest)
+			deps, goVersion, err := parseProjectDeps(dir, tc.pickNewest)
 			if tc.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, deps)
+			assert.Equal(t, tc.wantGoVersion, goVersion)
 		})
 	}
 }
@@ -842,5 +876,29 @@ func setupTestModuleEnv(t *testing.T) (string, func(version, sourceCode string))
 		modFile := "module " + testModName + "\n\ngo 1.24\n"
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(modFile), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "testmod.go"), []byte(sourceCode), 0o644))
+	}
+}
+
+func TestCompareGoVersions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		a, b string
+		want int // -1, 0, or 1
+	}{
+		{"1.12", "1.13", -1},
+		{"1.13", "1.12", 1},
+		{"1.12", "1.12", 0},
+		{"1.21", "1.9", 1}, // 21 > 9, not string comparison
+		{"1.12.5", "1.12.3", 1},
+		{"1.12.0", "1.12", 0},
+		{"1.21.0", "1.21", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.a+"_vs_"+tt.b, func(t *testing.T) {
+			got := compareGoVersions(tt.a, tt.b)
+			assert.Equal(t, tt.want, got)
+		})
 	}
 }

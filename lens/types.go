@@ -25,6 +25,8 @@ type ModuleChange struct {
 	NewVersion string
 	// Indirect indicates the module is an indirect dependency.
 	Indirect bool
+	// GoVersion is the minimum Go version from the module's go.mod (oldest of old/new versions).
+	GoVersion string
 }
 
 // Function holds info about a function after static analysis.

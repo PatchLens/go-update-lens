@@ -80,7 +80,7 @@ func TestASTEndToEnd(t *testing.T) {
 			name: "basic", // no function injection, only direct client call
 			src: `package main
 func main() {
-	SendLensPointMessage(1)
+	sendLensPointMessage(1)
 }`,
 			inject: func(m *ASTModifier, fn *Function) ([]uint32, error) {
 				return nil, nil // no-op
@@ -754,11 +754,11 @@ func TestCaptureLensMonitorStack(t *testing.T) {
 	}
 }
 
-func dummyFuncLevel1(skip int) []LensMonitorStackFrame {
+func dummyFuncLevel1(skip int) []lensMonitorStackFrame {
 	return dummyFuncLevel2(skip)
 }
 
-func dummyFuncLevel2(skip int) []LensMonitorStackFrame {
+func dummyFuncLevel2(skip int) []lensMonitorStackFrame {
 	return captureLensMonitorStack(skip)
 }
 

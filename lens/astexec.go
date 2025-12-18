@@ -33,6 +33,24 @@ const (
 	testFailStr            = "FAIL"
 )
 
+// FilterModulesByGoVersion removes functions from modules with Go versions below MinGoVersion.
+func FilterModulesByGoVersion(reachableModuleChanges ReachableModuleChange) (filtered []*ModuleFunction, skippedCount int) {
+	skippedModules := make(map[string]bool)
+	for _, mf := range reachableModuleChanges {
+		if mf.Module != nil && IsGoVersionBelowMinimum(mf.Module.GoVersion) {
+			if !skippedModules[mf.Module.Name] {
+				log.Printf("WARN: Skipping coverage tracking of module %s (Go %s below minimum %s)",
+					mf.Module.Name, mf.Module.GoVersion, MinGoVersion)
+				skippedModules[mf.Module.Name] = true
+			}
+			skippedCount++
+			continue
+		}
+		filtered = append(filtered, mf)
+	}
+	return
+}
+
 // RunModuleUpdateAnalysis modifies the project and modules AST to include hooks for calls into the AST client.
 // Our astServer accepts these calls, and invokes back into our code here so that we can analyze the project execution.
 //
@@ -41,16 +59,17 @@ const (
 //   - postUpdateExtensionConfig: Called before second test run (new version)
 //
 // Both hooks are optional (can be nil). The returned point IDs from both are merged for monitoring.
+// Returns: projectFieldChecks, moduleChangesReached, skippedModuleFuncs, preResults, postResults, error
 func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart int,
 	storage Storage, maxVariableRecurse, maxFieldLen int, // values impact memory usage
 	changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
 	callingFunctions []*CallerFunction, testFunctions []*TestFunction,
 	preUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error),
-	postUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error)) (int, int, Storage, Storage, error) {
+	postUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error)) (int, int, int, Storage, Storage, error) {
 	env := GoEnv(gopath, gomodcache)
 
 	if err := goCacheClean(env); err != nil { // will be cleaned at the end of each analysis also
-		return 0, 0, nil, nil, fmt.Errorf("failure to clean go cache: %w", err)
+		return 0, 0, 0, nil, nil, fmt.Errorf("failure to clean go cache: %w", err)
 	}
 
 	// start ast monitor servers once to be reused across tests
@@ -68,26 +87,29 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 		srv, err := astExecServerStart(lensMonitorServerHost, portStart+i, nil, maxFieldLen)
 		log.Printf("Test Execution Monitor started on %s:%d", lensMonitorServerHost, portStart+i)
 		if err != nil {
-			return 0, 0, nil, nil, err
+			return 0, 0, 0, nil, nil, err
 		}
 		srvs = append(srvs, srv)
 		srvChan <- srv
 	}
+
+	// filter out modules with Go versions below minimum for AST instrumentation
+	filteredModuleChanges, skippedModuleFuncs := FilterModulesByGoVersion(reachableModuleChanges)
 
 	// capture stable field values before update
 	preStorage := KeyPrefixStorage(storage, "pre")
 	projectFieldChecks1, moduleChangesReached, err :=
 		runMonitoredTestAnalysis(env, maxVariableRecurse, maxFieldLen, srvChan, gopath, projectDir,
 			nil, preStorage,
-			bulk.MapValuesSlice(reachableModuleChanges), callingFunctions, testFunctions, preUpdateExtensionConfig, nil)
+			filteredModuleChanges, callingFunctions, testFunctions, preUpdateExtensionConfig, nil)
 	if err != nil {
-		return projectFieldChecks1, moduleChangesReached, nil, nil, err
+		return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil, err
 	}
 
 	// backup all go.mod/go.sum files then perform module update in each module directory
 	goModPaths, err := ProjectGoModFiles(projectDir)
 	if err != nil {
-		return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
+		return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil, err
 	}
 
 	type modBackupInfo struct {
@@ -101,14 +123,14 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 		sum := filepath.Join(filepath.Dir(gm), "go.sum")
 		info := modBackupInfo{modPath: gm, modBkp: gm + ".bkp"}
 		if err := CopyFile(gm, info.modBkp); err != nil {
-			return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+			return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
 				fmt.Errorf("backup go.mod failed: %w", err)
 		}
 		if FileExists(sum) {
 			info.sumPath = sum
 			info.sumBkp = sum + ".bkp"
 			if err := CopyFile(sum, info.sumBkp); err != nil {
-				return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+				return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
 					fmt.Errorf("backup go.sum failed: %w", err)
 			}
 		}
@@ -121,13 +143,13 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 			getCmd := NewProjectLoggedExec(modDir, env, "go", "get",
 				fmt.Sprintf("%s@%s", cm.Name, cm.NewVersion))
 			if err := getCmd.Run(); err != nil {
-				return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+				return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
 					fmt.Errorf("module update failed: %w", err)
 			}
 		}
 		tidyCmd := NewProjectLoggedExec(modDir, env, "go", "mod", "tidy")
 		if err := tidyCmd.Run(); err != nil {
-			return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+			return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
 				fmt.Errorf("module update tidy failed: %w", err)
 		}
 	}
@@ -141,23 +163,23 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 			nil, // module change function definitions are not valid for the updated version
 			callingFunctions, testFunctions, nil, postUpdateExtensionConfig)
 	if err != nil {
-		return projectFieldChecks1, moduleChangesReached, preStorage, nil, err
+		return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil, err
 	}
 
 	// RESTORE original go.mod & go.sum for each module
 	for _, b := range backups {
 		if err := os.Rename(b.modBkp, b.modPath); err != nil {
-			return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+			return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
 				fmt.Errorf("failed to restore %s: %w", b.modPath, err)
 		} else if b.sumPath != "" {
 			if err := os.Rename(b.sumBkp, b.sumPath); err != nil {
-				return projectFieldChecks1, moduleChangesReached, preStorage, nil,
+				return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
 					fmt.Errorf("failed to restore %s: %w", b.modPath, err)
 			}
 		}
 	}
 
-	return max(projectFieldChecks1, projectFieldChecks2), moduleChangesReached, preStorage, postStorage, nil
+	return max(projectFieldChecks1, projectFieldChecks2), moduleChangesReached, skippedModuleFuncs, preStorage, postStorage, nil
 }
 
 func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
@@ -303,6 +325,9 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 
 			newPoints, err := astEditor.InjectFuncPointReturnStates(&cf.Function)
 			if err != nil {
+				if IsNormalAstError(err) {
+					continue
+				}
 				return fmt.Errorf("failed to inject project return state point monitor: %w", err)
 			} else if len(newPoints) == 0 {
 				fmt.Printf("%sFunction already updated: %s %s\n", ErrorLogPrefix, cf.FilePath, cf.FunctionIdent)
@@ -319,6 +344,9 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 
 			panicPointId, err := astEditor.InjectFuncPointPanic(&cf.Function)
 			if err != nil {
+				if IsNormalAstError(err) {
+					continue
+				}
 				return fmt.Errorf("failed to inject project panic point monitor: %w", err)
 			}
 			panicPointIds[panicPointId] = &cf.FunctionIdent
@@ -381,6 +409,9 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 			for _, mf := range funcs {
 				entryPointId, err := astEditor.InjectFuncPointEntry(&mf.Function)
 				if err != nil {
+					if IsNormalAstError(err) {
+						continue
+					}
 					return fmt.Errorf("failed to inject module entry point monitor: %w", err)
 				}
 				entryPointIds[entryPointId] = &mf.FunctionIdent
@@ -391,6 +422,9 @@ func injectMonitorPoints(astEditor *ASTModifier, maxVariableRecurse, maxFieldLen
 				if !mf.ReturnPanic { // injecting the recover on a function which returns in panic could cause a compile failure
 					panicPointId, err := astEditor.InjectFuncPointPanic(&mf.Function)
 					if err != nil {
+						if IsNormalAstError(err) {
+							continue
+						}
 						return fmt.Errorf("failed to inject module panic point monitor: %w", err)
 					}
 					panicPointIds[panicPointId] = &mf.FunctionIdent
@@ -588,7 +622,7 @@ type testMonitor struct {
 	wait                 sync.WaitGroup
 }
 
-func debugLogMonitorStack(pointId uint32, stack []LensMonitorStackFrame) {
+func debugLogMonitorStack(pointId uint32, stack []lensMonitorStackFrame) {
 	fmt.Printf(">> Stacktrace for monitor point %d:\n", pointId)
 	for _, frame := range stack {
 		fmt.Printf("\t%s:%d\t%s\n", frame.File, frame.Line, frame.Function)

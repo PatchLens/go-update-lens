@@ -131,11 +131,12 @@ type UpdateAnalysisProvider interface {
 	// Returns:
 	//   - int: number of project field checks performed
 	//   - int: number of module changes reached during testing
+	//   - int: number of module functions skipped due to Go version incompatibility
 	//   - Storage: pre-update test results storage
 	//   - Storage: post-update test results storage
 	//   - error: any error encountered during analysis
 	RunModuleUpdateAnalysis(config Config, storage Storage, changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
-		callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error)
+		callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, int, Storage, Storage, error)
 
 	// Cleanup is invoked after engine analysis is complete, allowing freeing of resources used during update analysis.
 	Cleanup()
@@ -223,6 +224,7 @@ type ReportWriter interface {
 	//   - checkedModules: list of all modules that were analyzed
 	//   - moduleChangeCount: total number of changed functions across all modules
 	//   - moduleChangesReachedInTesting: number of module changes exercised by tests
+	//   - untrackedModuleFuncs: number of module functions skipped due to Go version incompatibility
 	//   - projectFieldChecks: number of field value checks performed on project code
 	//   - callingFunctions: project functions that call changed module functions
 	//   - testFunctions: test functions that exercise the affected code
@@ -235,7 +237,7 @@ type ReportWriter interface {
 	//   - error: any error encountered during report generation or file writing
 	WriteReportFiles(reportJsonFile, reportChartsFile string, startTime time.Time,
 		analysisTime, testDiscoveryTime, testExecutionTime, mutationTime time.Duration,
-		changedModules []*ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting int,
+		changedModules []*ModuleChange, checkedModules []string, moduleChangeCount, moduleChangesReachedInTesting, untrackedModuleFuncs int,
 		projectFieldChecks int, callingFunctions []*CallerFunction, testFunctions []*TestFunction,
 		sameCount, diffCount int, testReports []TestReport,
 		globalMutations MutationResult) error
@@ -320,7 +322,7 @@ type DefaultUpdateAnalysisProvider struct {
 
 func (d *DefaultUpdateAnalysisProvider) RunModuleUpdateAnalysis(config Config,
 	storage Storage, changedModules []*ModuleChange, reachableModuleChanges ReachableModuleChange,
-	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, Storage, Storage, error) {
+	callingFunctions []*CallerFunction, testFunctions []*TestFunction) (int, int, int, Storage, Storage, error) {
 	return RunModuleUpdateAnalysis(config.Gopath, config.Gomodcache, config.AbsProjDir, config.AstMonitorPort,
 		storage, config.MaxFieldRecurse, config.MaxFieldLen,
 		changedModules, reachableModuleChanges, callingFunctions, testFunctions,
@@ -658,7 +660,7 @@ type DefaultReportWriter struct{}
 
 func (d *DefaultReportWriter) WriteReportFiles(jsonPath, chartPath string, startTime time.Time,
 	analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration time.Duration,
-	changedModules []*ModuleChange, checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting int,
+	changedModules []*ModuleChange, checkedModules []string, moduleChangeFuncCount, moduleChangesReachedInTesting, untrackedModuleFuncs int,
 	projectFieldChecks int, projectCallingFunctions []*CallerFunction, relevantTestFunctions []*TestFunction,
 	testFieldSameCount, testFieldDiffCount int, testResults []TestReport,
 	globalMutations MutationResult) error {
@@ -668,7 +670,7 @@ func (d *DefaultReportWriter) WriteReportFiles(jsonPath, chartPath string, start
 
 	err := writeReportJSON(jsonPath, startTime, analysisDuration, testDiscoveryDuration, fieldCheckDuration, mutationDuration,
 		rootM.Name, rootM.PriorVersion, rootM.NewVersion,
-		checkedModules, moduleChangeFuncCount, moduleChangesReachedInTesting,
+		checkedModules, moduleChangeFuncCount, moduleChangesReachedInTesting, untrackedModuleFuncs,
 		reachableModuleFunctionsIdents,
 		relevantProjectFunctionIdents,
 		projectFieldChecks, relevantTestFunctionsIdents, testFieldSameCount, testFieldDiffCount,
@@ -678,7 +680,7 @@ func (d *DefaultReportWriter) WriteReportFiles(jsonPath, chartPath string, start
 	}
 
 	err = writeReportCharts(chartPath, rootM.Name, rootM.PriorVersion, rootM.NewVersion,
-		moduleChangeFuncCount, len(reachableModuleFunctionsIdents), moduleChangesReachedInTesting,
+		moduleChangeFuncCount, len(reachableModuleFunctionsIdents), moduleChangesReachedInTesting, untrackedModuleFuncs,
 		testFieldSameCount, testFieldDiffCount, testResults, globalMutations)
 	if err != nil {
 		return err
@@ -812,7 +814,7 @@ func (e *AnalysisEngine) Run() error {
 		analysisEndTime := time.Now()
 		return e.ReportWriter.WriteReportFiles(e.Config.ReportJsonFile, e.Config.ReportChartsFile,
 			startTime, analysisEndTime.Sub(startTime), 0, 0, 0,
-			initialModules.changedModules, checkedModuleNames, 0, 0,
+			initialModules.changedModules, checkedModuleNames, 0, 0, 0,
 			0, nil, nil,
 			0, 0, nil, MutationResult{})
 	}
@@ -835,7 +837,7 @@ func (e *AnalysisEngine) Run() error {
 		log.Printf("Module changes are not reachable by project, exiting")
 		return e.ReportWriter.WriteReportFiles(e.Config.ReportJsonFile, e.Config.ReportChartsFile,
 			startTime, analysisEndTime.Sub(startTime), 0, 0, 0,
-			initialModules.changedModules, checkedModuleNames, 0, 0,
+			initialModules.changedModules, checkedModuleNames, 0, 0, 0,
 			0, callingFunctions, nil,
 			0, 0, nil, MutationResult{})
 	}
@@ -858,7 +860,7 @@ func (e *AnalysisEngine) Run() error {
 		log.Printf("Unable to find or create relevant test functions, exiting...")
 		return e.ReportWriter.WriteReportFiles(e.Config.ReportJsonFile, e.Config.ReportChartsFile,
 			startTime, analysisEndTime.Sub(startTime), testDiscoveryEndTime.Sub(analysisEndTime), 0, 0,
-			initialModules.changedModules, checkedModuleNames, len(moduleChanges), 0,
+			initialModules.changedModules, checkedModuleNames, len(moduleChanges), 0, 0,
 			0, callingFunctions, testFunctions,
 			0, 0, nil, MutationResult{})
 	}
@@ -875,7 +877,7 @@ func (e *AnalysisEngine) Run() error {
 		return fmt.Errorf("error opening storage: %w", err)
 	}
 	defer storage.Close()
-	projectFieldChecks, moduleChangesReachedInTesting, preResults, postResults, err :=
+	projectFieldChecks, moduleChangesReachedInTesting, skippedModuleFuncs, preResults, postResults, err :=
 		e.UpdateAnalysisProvider.RunModuleUpdateAnalysis(*e.Config, storage,
 			initialModules.changedModules, reachableModuleChanges, callingFunctions, testFunctions)
 	if err != nil {
@@ -916,7 +918,7 @@ func (e *AnalysisEngine) Run() error {
 		testDiscoveryEndTime.Sub(analysisEndTime),
 		testExecutionAnalysisEndTime.Sub(testDiscoveryEndTime),
 		mutationEndTime.Sub(testExecutionAnalysisEndTime),
-		initialModules.changedModules, checkedModuleNames, len(moduleChanges), moduleChangesReachedInTesting,
+		initialModules.changedModules, checkedModuleNames, len(moduleChanges), moduleChangesReachedInTesting, skippedModuleFuncs,
 		projectFieldChecks, callingFunctions, testFunctions, sameCount, diffCount, testReports,
 		globalMutations)
 	if err != nil {

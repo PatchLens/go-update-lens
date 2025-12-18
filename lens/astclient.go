@@ -58,8 +58,8 @@ func init() {
 	lensMonitorEndpointPanic = serverURL + lensMonitorEndpointPathPanic
 }
 
-// SendLensPointMessage sends a LensMonitorMessagePoint to the backend.
-func SendLensPointMessage(id uint32) {
+// sendLensPointMessage sends a LensMonitorMessagePoint to the backend.
+func sendLensPointMessage(id uint32) {
 	stack := captureLensMonitorStack(3) // skip runtime.Callers, captureLensMonitorStack, this func
 
 	var buf bytes.Buffer
@@ -67,25 +67,25 @@ func SendLensPointMessage(id uint32) {
 	postLensMonitorMessage(lensMonitorEndpointPoint, id, &buf)
 }
 
-func lensEncodeMessagePoint(w io.Writer, id uint32, timestamp int64, stack []LensMonitorStackFrame) {
+func lensEncodeMessagePoint(w io.Writer, id uint32, timestamp int64, stack []lensMonitorStackFrame) {
 	lw := &lensMsgEncoder{w: w}
 	lw.writeVarint(uint64(id))
 	lw.writeInt64(timestamp)
 	lw.writeStackFrames(stack)
 }
 
-// LensMonitorFieldSnapshot is the only thing the injector needs to build for each
+// lensMonitorFieldSnapshot is the only thing the injector needs to build for each
 // visible identifier.  It purposely keeps metadata tiny and uses `any` for
 // the value so the client owns all heavy work (reflection, truncation, etc.).
-type LensMonitorFieldSnapshot struct {
+type lensMonitorFieldSnapshot struct {
 	Name string      // field identifier or synthetic name ("ret0", "rec0", ...)
 	Val  interface{} // the live value
 }
 
-// SendLensPointStateMessage sends a LensMonitorMessagePointState to the backend.
-func SendLensPointStateMessage(id uint32, snaps ...LensMonitorFieldSnapshot) {
+// sendLensPointStateMessage sends a LensMonitorMessagePointState to the backend.
+func sendLensPointStateMessage(id uint32, snaps ...lensMonitorFieldSnapshot) {
 	// Filter nil snapshots first to get accurate count
-	validSnaps := make([]LensMonitorFieldSnapshot, 0, len(snaps))
+	validSnaps := make([]lensMonitorFieldSnapshot, 0, len(snaps))
 	for _, s := range snaps {
 		if s.Name != "nil" {
 			validSnaps = append(validSnaps, s)
@@ -99,7 +99,7 @@ func SendLensPointStateMessage(id uint32, snaps ...LensMonitorFieldSnapshot) {
 	postLensMonitorMessage(lensMonitorEndpointState, id, &buf)
 }
 
-func lensEncodeMessagePointState(w io.Writer, id uint32, timestamp int64, stack []LensMonitorStackFrame, snaps []LensMonitorFieldSnapshot) {
+func lensEncodeMessagePointState(w io.Writer, id uint32, timestamp int64, stack []lensMonitorStackFrame, snaps []lensMonitorFieldSnapshot) {
 	lw := &lensMsgEncoder{w: w}
 	lw.writeVarint(uint64(id))
 	lw.writeInt64(timestamp)
@@ -117,8 +117,8 @@ func limitLensMonitorStringSize(s string) string {
 	return s
 }
 
-// SendLensPointRecoveryMessage sends a LensMonitorMessagePointPanic to the backend.
-func SendLensPointRecoveryMessage(id uint32, r interface{}) {
+// sendLensPointRecoveryMessage sends a LensMonitorMessagePointPanic to the backend.
+func sendLensPointRecoveryMessage(id uint32, r interface{}) {
 	if r == nil {
 		return
 	}
@@ -135,14 +135,14 @@ func lensEncodeMessagePointPanic(w io.Writer, id uint32, timestamp int64, r inte
 	lw.writeString(fmt.Sprintf("%v", r))
 }
 
-func captureLensMonitorStack(skip int) []LensMonitorStackFrame {
+func captureLensMonitorStack(skip int) []lensMonitorStackFrame {
 	pcs := make([]uintptr, lensMonitorMaxStackFrames)
 	n := runtime.Callers(skip, pcs)
 	frames := runtime.CallersFrames(pcs[:n])
-	stack := make([]LensMonitorStackFrame, 0, n)
+	stack := make([]lensMonitorStackFrame, 0, n)
 	for {
 		f, more := frames.Next()
-		stack = append(stack, LensMonitorStackFrame{
+		stack = append(stack, lensMonitorStackFrame{
 			File:     f.File,
 			Function: f.Function,
 			Line:     uint(f.Line), // TODO - FUTURE - the line number may be unexpected due to AST modifications, before reporting to user we should update to reference the original positions
@@ -158,17 +158,17 @@ func captureLensMonitorStack(skip int) []LensMonitorStackFrame {
 func postLensMonitorMessage(endpoint string, id uint32, body io.Reader) {
 	r, err := lensHttpClient.Post(endpoint, "application/octet-stream", body)
 	if err != nil {
-		SendLensError(id, fmt.Errorf("POST to %s failed: %w", endpoint, err))
+		sendLensError(id, fmt.Errorf("POST to %s failed: %w", endpoint, err))
 		return
 	}
 	defer func() { _ = r.Body.Close() }()
 	if r.StatusCode >= 300 {
-		SendLensError(id, fmt.Errorf("%s returned status %d", endpoint, r.StatusCode))
+		sendLensError(id, fmt.Errorf("%s returned status %d", endpoint, r.StatusCode))
 	}
 }
 
-// SendLensError sends an Error notification to the backend.
-func SendLensError(id uint32, origErr error) {
+// sendLensError sends an Error notification to the backend.
+func sendLensError(id uint32, origErr error) {
 	if origErr == nil {
 		return
 	}
@@ -189,7 +189,7 @@ func SendLensError(id uint32, origErr error) {
 	}
 }
 
-func lensEncodeMessageError(w io.Writer, id uint32, origErr error, stack []LensMonitorStackFrame) {
+func lensEncodeMessageError(w io.Writer, id uint32, origErr error, stack []lensMonitorStackFrame) {
 	lw := &lensMsgEncoder{w: w}
 	lw.writeVarint(uint64(id))
 	lw.writeString(origErr.Error())
@@ -201,7 +201,7 @@ type lensMsgEncoder struct {
 	buf [10]byte // reused for all primitive writes
 }
 
-func (lw *lensMsgEncoder) writeStackFrames(frames []LensMonitorStackFrame) {
+func (lw *lensMsgEncoder) writeStackFrames(frames []lensMonitorStackFrame) {
 	lw.writeVarint(uint64(len(frames)))
 	if len(frames) == 0 {
 		return

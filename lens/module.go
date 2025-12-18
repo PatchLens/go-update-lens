@@ -223,17 +223,21 @@ func analyzeModuleChangesInternal(includeTransitive bool, mc *ModuleChange, gomo
 		// if a used public function was removed, it will be found in a compile failure
 	}
 
+	// Parse module go.mod files to get dependencies and Go version
+	oldDeps, oldGoVer, errOld := parseProjectDeps(oldDir, false)
+	newDeps, newGoVer, errNew := parseProjectDeps(newDir, true)
+	if errOld != nil || errNew != nil {
+		return nil, nil, nil, fmt.Errorf("could not read module files for %s: %w", mc.Name, errors.Join(errOld, errNew))
+	}
+	// Set the oldest Go version from the module's go.mod files
+	mc.GoVersion = olderGoVersion(olderGoVersion(mc.GoVersion, oldGoVer), newGoVer)
+
 	if !includeTransitive {
 		return changes, newPkgs, nil, nil // early return to avoid transitive dependency build below
 	}
 
 	// Check for go.mod / go.work differences and recursively analyze changed dependencies
-	oldDeps, errOld := parseProjectDeps(oldDir, false)
-	newDeps, errNew := parseProjectDeps(newDir, true)
-	if errOld != nil || errNew != nil {
-		return nil, nil, nil, fmt.Errorf("could not read module files for %s: %w", mc.Name, errors.Join(errOld, errNew))
-	}
-	projectDeps, err := parseProjectDeps(projectDir, false)
+	projectDeps, _, err := parseProjectDeps(projectDir, false)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not read project dependencies: %w", err)
 	}
@@ -298,20 +302,24 @@ func FindModulePathInCache(gomodcache, modPath, version string) (string, error) 
 	return dir, nil
 }
 
-func parseGoMod(gomodPath string) (map[string]string, error) {
+// parseGoMod parses a go.mod file and returns the dependencies map and the go version directive.
+func parseGoMod(gomodPath string) (deps map[string]string, goVersion string, err error) {
 	goModData, err := os.ReadFile(gomodPath)
 	if err != nil {
-		return nil, fmt.Errorf("read %s failed: %w", gomodPath, err)
+		return nil, "", fmt.Errorf("read %s failed: %w", gomodPath, err)
 	}
 	modFile, err := modfile.Parse(gomodPath, goModData, nil)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s failed: %w", gomodPath, err)
+		return nil, "", fmt.Errorf("parse %s failed: %w", gomodPath, err)
 	}
-	deps := make(map[string]string, len(modFile.Require))
+	deps = make(map[string]string, len(modFile.Require))
 	for _, r := range modFile.Require {
 		deps[r.Mod.Path] = r.Mod.Version
 	}
-	return deps, nil
+	if modFile.Go != nil {
+		goVersion = modFile.Go.Version
+	}
+	return deps, goVersion, nil
 }
 
 // parseGoWork parses a go.work file and returns module directories relative to the workspace root.
@@ -408,40 +416,44 @@ func resolveGoModPath(projectDir, dir string) string {
 }
 
 // parseProjectDeps reads dependencies from either a single go.mod or a go.work workspace.
-func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, error) {
+// Returns the dependencies map and the oldest Go version found across all parsed go.mod files.
+func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, string, error) {
 	rootMod := filepath.Join(projectDir, "go.mod")
 	workFile := filepath.Join(projectDir, "go.work")
 
 	// versionsMap collects every version seen for each module path
 	versionsMap := make(map[string][]string)
+	var oldestGoVersion string
 
 	if FileExists(rootMod) { // root module if present
-		rootDeps, err := parseGoMod(rootMod)
+		rootDeps, goVer, err := parseGoMod(rootMod)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		for modPath, ver := range rootDeps {
 			versionsMap[modPath] = append(versionsMap[modPath], ver)
 		}
+		oldestGoVersion = olderGoVersion(oldestGoVersion, goVer)
 	}
 
 	if FileExists(workFile) { // workspace modules
 		dirs, err := parseGoWork(workFile)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		for _, dir := range dirs {
 			gm := resolveGoModPath(projectDir, dir)
 			if _, err := os.Stat(gm); err != nil {
 				continue // skip missing or unreadable module rather than failing the whole parse
 			}
-			mdeps, err := parseGoMod(gm)
+			mdeps, goVer, err := parseGoMod(gm)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			for modPath, ver := range mdeps {
 				versionsMap[modPath] = append(versionsMap[modPath], ver)
 			}
+			oldestGoVersion = olderGoVersion(oldestGoVersion, goVer)
 		}
 	}
 
@@ -463,9 +475,29 @@ func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, 
 		deps[modPath] = chosen
 	}
 	if len(deps) == 0 {
-		return nil, fmt.Errorf("no go.mod or go.work found in %s", projectDir)
+		return nil, "", fmt.Errorf("no go.mod or go.work found in %s", projectDir)
 	}
-	return deps, nil
+	return deps, oldestGoVersion, nil
+}
+
+// compareGoVersions compares two Go version strings (e.g., "1.12", "1.21").
+// Returns -1 if a < b, 0 if a == b, 1 if a > b.
+func compareGoVersions(a, b string) int {
+	return semver.Compare("v"+a, "v"+b)
+}
+
+// olderGoVersion returns the older version, treating empty as "no constraint".
+func olderGoVersion(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	if compareGoVersions(a, b) < 0 {
+		return a
+	}
+	return b
 }
 
 // ProjectGoModFiles returns all go.mod files for the project directory, supporting workspaces via go.work.

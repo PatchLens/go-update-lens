@@ -39,6 +39,25 @@ const (
 	literalNil                        = "nil"
 )
 
+// MinGoVersion defines the minimum Go version required for instrumentation.
+const MinGoVersion = "1.13" // Go 1.13+ is required due to signed shift count operations in generated code.
+
+// IsGoVersionBelowMinimum returns true if goVersion is below MinGoVersion.
+func IsGoVersionBelowMinimum(goVersion string) bool {
+	if goVersion == "" {
+		return false
+	}
+	return compareGoVersions(goVersion, MinGoVersion) < 0
+}
+
+// ErrNoFunctionBody indicates a function has no body (e.g., assembly-only or external).
+var ErrNoFunctionBody = errors.New("function has no body (likely assembly or external implementation)")
+
+// IsNormalAstError returns true if the error should be skipped rather than failing.
+func IsNormalAstError(err error) bool {
+	return errors.Is(err, ErrNoFunctionBody)
+}
+
 // embed the template files into the binary
 //
 //go:embed astclient.go
@@ -361,8 +380,10 @@ func (m *ASTModifier) injectPoint(filePath, pkg, funcIdent string, modify func(b
 		return 0, err
 	}
 	target := findFuncDecl(fileNode, pkg, funcIdent)
-	if target == nil || target.Body == nil {
+	if target == nil {
 		return 0, fmt.Errorf("function %s not found in %s", funcIdent, filePath)
+	} else if target.Body == nil {
+		return 0, fmt.Errorf("%w: %s in %s", ErrNoFunctionBody, funcIdent, filePath)
 	}
 
 	pointID, err := m.nextPointId()
@@ -394,7 +415,7 @@ func (m *ASTModifier) InjectFuncPointPanic(f *Function) (uint32, error) {
 		// build:
 		//   defer func() {
 		//     if r := recover(); r != nil {
-		//       SendLensPointRecoveryMessage(pointID, r)
+		//       sendLensPointRecoveryMessage(pointID, r)
 		//       panic(r)
 		//     }
 		//   }()
@@ -416,9 +437,9 @@ func (m *ASTModifier) InjectFuncPointPanic(f *Function) (uint32, error) {
 								Y:  ast.NewIdent(literalNil),
 							},
 							Body: &ast.BlockStmt{List: []ast.Stmt{
-								// SendLensPointRecoveryMessage(pointID, r)
+								// sendLensPointRecoveryMessage(pointID, r)
 								&ast.ExprStmt{X: &ast.CallExpr{
-									Fun: ast.NewIdent("SendLensPointRecoveryMessage"),
+									Fun: ast.NewIdent("sendLensPointRecoveryMessage"),
 									Args: []ast.Expr{
 										&ast.BasicLit{Kind: token.INT, Value: strconv.FormatUint(uint64(pointID), 10)},
 										ast.NewIdent("r"),
@@ -451,8 +472,10 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]uint32, error
 		return nil, err
 	}
 	funcDecl := findFuncDecl(fileNode, fn.PackageName, fn.FunctionIdent)
-	if funcDecl == nil || funcDecl.Body == nil {
-		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionName, fn.FilePath)
+	if funcDecl == nil {
+		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionIdent, fn.FilePath)
+	} else if funcDecl.Body == nil {
+		return nil, fmt.Errorf("%w: %s in %s", ErrNoFunctionBody, fn.FunctionIdent, fn.FilePath)
 	} else if hasPatchlensMarker(funcDecl, modificationMarker) {
 		return []uint32{}, nil // already inserted
 	}
@@ -640,8 +663,10 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		return nil, err
 	}
 	funcDecl := findFuncDecl(fileNode, fn.PackageName, fn.FunctionIdent)
-	if funcDecl == nil || funcDecl.Body == nil {
-		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionName, fn.FilePath)
+	if funcDecl == nil {
+		return nil, fmt.Errorf("function %s not found in %s", fn.FunctionIdent, fn.FilePath)
+	} else if funcDecl.Body == nil {
+		return nil, fmt.Errorf("%w: %s in %s", ErrNoFunctionBody, fn.FunctionIdent, fn.FilePath)
 	}
 	filePackageNames := make(map[string]bool, len(fileNode.Imports))
 	for _, imp := range fileNode.Imports {
@@ -1143,7 +1168,7 @@ func isPrevStmtSendLensPoint(stmts []ast.Stmt, idx int) bool {
 		return false
 	}
 	ident, ok := call.Fun.(*ast.Ident)
-	return ok && ident.Name == "SendLensPointStateMessage"
+	return ok && ident.Name == "sendLensPointStateMessage"
 }
 
 // visibleDeclsBefore collects visible identifiers before retPos using a syntactic scan.
@@ -1582,7 +1607,7 @@ func makeSendLensPointStateMessageStmt(buf *bytes.Buffer, pointID uint32, snaps 
 		}
 		args = append(args, buf.String())
 	}
-	callSrc := fmt.Sprintf("SendLensPointStateMessage(%s)", strings.Join(args, ", "))
+	callSrc := fmt.Sprintf("sendLensPointStateMessage(%s)", strings.Join(args, ", "))
 	expr, err := parser.ParseExpr(callSrc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse instrumentation call: %w", err)
@@ -1609,7 +1634,7 @@ func buildImplicitReturnInstrumentation(buf *bytes.Buffer, pointID uint32, decls
 const fieldKeyName = "Name"
 const fieldKeyVal = "Val"
 
-// makeSnapshotLit builds a *ast.CompositeLit representing a LensMonitorFieldSnapshot.
+// makeSnapshotLit builds a *ast.CompositeLit representing a lensMonitorFieldSnapshot.
 func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 	// we use long field names to avoid conflicts, but want to communicate concise names
 	if strings.HasPrefix(name, syntheticFieldNamePrefixReturn) {
@@ -1622,7 +1647,7 @@ func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 		name = strings.Replace(name, syntheticFieldNamePrefixReceiver, "recv", 1)
 	}
 	return &ast.CompositeLit{
-		Type: ast.NewIdent("LensMonitorFieldSnapshot"),
+		Type: ast.NewIdent("lensMonitorFieldSnapshot"),
 		Elts: []ast.Expr{
 			&ast.KeyValueExpr{
 				Key:   ast.NewIdent(fieldKeyName),
@@ -1640,7 +1665,7 @@ func makeSnapshotLit(name string, val ast.Expr) ast.Expr {
 // Unlike makeSnapshotLit, this does not perform any prefix-based name transformations.
 func makeSnapshotLitWithCustomName(displayName string, val ast.Expr) ast.Expr {
 	return &ast.CompositeLit{
-		Type: ast.NewIdent("LensMonitorFieldSnapshot"),
+		Type: ast.NewIdent("lensMonitorFieldSnapshot"),
 		Elts: []ast.Expr{
 			&ast.KeyValueExpr{
 				Key:   ast.NewIdent(fieldKeyName),
@@ -1753,26 +1778,24 @@ func isRecursiveCall(expr ast.Expr, funcName string) bool {
 	}
 }
 
-// InjectFuncPointEntry inserts a SendLensPointMessage client call at the very start of the function to
-// track entry coverage into the function.
+// InjectFuncPointEntry injects a sendLensPointMessage call at function entry for coverage tracking.
 func (m *ASTModifier) InjectFuncPointEntry(fn *Function) (uint32, error) {
 	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID uint32) {
-		// build SendLensPointMessage(pointID)
+		// build sendLensPointMessage(pointID)
 		stmt := &ast.ExprStmt{X: &ast.CallExpr{
-			Fun:  ast.NewIdent("SendLensPointMessage"),
+			Fun:  ast.NewIdent("sendLensPointMessage"),
 			Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: strconv.FormatUint(uint64(pointID), 10)}},
 		}}
 		body.List = append([]ast.Stmt{stmt}, body.List...)
 	})
 }
 
-// InjectFuncPointFinish inserts a SendLensPointMessage client call as a defere at the start of the function
-// to indicate that the function.
+// InjectFuncPointFinish injects a deferred sendLensPointMessage call to track function completion.
 func (m *ASTModifier) InjectFuncPointFinish(fn *Function) (uint32, error) {
 	return m.injectPoint(fn.FilePath, fn.PackageName, fn.FunctionIdent, func(body *ast.BlockStmt, pointID uint32) {
-		// build defer SendLensPointMessage(pointID)
+		// build defer sendLensPointMessage(pointID)
 		deferStmt := &ast.DeferStmt{Call: &ast.CallExpr{
-			Fun:  ast.NewIdent("SendLensPointMessage"),
+			Fun:  ast.NewIdent("sendLensPointMessage"),
 			Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: strconv.FormatUint(uint64(pointID), 10)}},
 		}}
 		body.List = append([]ast.Stmt{deferStmt}, body.List...)
@@ -1814,8 +1837,10 @@ func (m *ASTModifier) InsertFuncLines(fn *Function, cb func(i int, line string) 
 		return fmt.Errorf("ast parse failure %s: %w", fn.FilePath, err)
 	}
 	decl := findFuncDecl(fileNode, fn.PackageName, fn.FunctionIdent)
-	if decl == nil || decl.Body == nil {
+	if decl == nil {
 		return fmt.Errorf("function %s not found in %s", fn.FunctionIdent, fn.FilePath)
+	} else if decl.Body == nil {
+		return fmt.Errorf("%w: %s in %s", ErrNoFunctionBody, fn.FunctionIdent, fn.FilePath)
 	}
 	funcStartLine := fset.Position(decl.Pos()).Line
 	// determine which lines are "inside" the function body (exclude the braces themselves)

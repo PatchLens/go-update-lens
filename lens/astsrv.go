@@ -28,7 +28,7 @@ type astPointHandler interface {
 type LensMonitorMessageError struct {
 	PointID uint32 // instrumented point id (provided to client from AST)
 	Message string
-	Stack   []LensMonitorStackFrame // call stack frames
+	Stack   []lensMonitorStackFrame // call stack frames
 }
 
 // LensMonitorMessagePointPanic is sent when a function has an unrecovered panic.
@@ -42,14 +42,14 @@ type LensMonitorMessagePointPanic struct {
 type LensMonitorMessagePoint struct {
 	PointID uint32                  // instrumented point id (provided to client from AST)
 	TimeNS  int64                   // nanoseconds since the process start
-	Stack   []LensMonitorStackFrame // call stack frames
+	Stack   []lensMonitorStackFrame // call stack frames
 }
 
 // LensMonitorMessagePointState is sent when you want the full field snapshot at a point within a function.
 type LensMonitorMessagePointState struct {
 	PointID uint32                  // instrumented point id (provided to client from AST)
 	TimeNS  int64                   // nanoseconds since the process start
-	Stack   []LensMonitorStackFrame // call stack frames
+	Stack   []lensMonitorStackFrame // call stack frames
 	Fields  []LensMonitorField      // variables reachable within the function scope (parameters, local values, etc)
 }
 
@@ -305,7 +305,7 @@ func (lr *lensReader) decodeMessageError() (LensMonitorMessageError, error) {
 	return msg, nil
 }
 
-func (lr *lensReader) readStackFrames() ([]LensMonitorStackFrame, error) {
+func (lr *lensReader) readStackFrames() ([]lensMonitorStackFrame, error) {
 	count, err := lr.readVarint()
 	if err != nil {
 		return nil, err
@@ -330,7 +330,7 @@ func (lr *lensReader) readStackFrames() ([]LensMonitorStackFrame, error) {
 	}
 
 	// Read frames using string indices
-	frames := make([]LensMonitorStackFrame, count)
+	frames := make([]lensMonitorStackFrame, count)
 	for i := uint64(0); i < count; i++ {
 		fileIdx, err := lr.readVarint()
 		if err != nil {

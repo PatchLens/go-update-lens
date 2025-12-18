@@ -2,6 +2,7 @@ package lens
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -152,27 +153,28 @@ func BenchmarkASTClientServer(b *testing.B) {
 		err = srv.SetPointHandler(monitor)
 		require.NoError(b, err)
 
-		SendLensPointMessage(1)
-		SendLensPointStateMessage(2,
-			LensMonitorFieldSnapshot{Name: "b", Val: b},
-			LensMonitorFieldSnapshot{Name: "u32", Val: u32},
-			LensMonitorFieldSnapshot{Name: "u64", Val: u64},
-			LensMonitorFieldSnapshot{Name: "i32", Val: i32},
-			LensMonitorFieldSnapshot{Name: "i64", Val: i64},
-			LensMonitorFieldSnapshot{Name: "f32", Val: f32},
-			LensMonitorFieldSnapshot{Name: "f64", Val: f64},
-			LensMonitorFieldSnapshot{Name: "f64", Val: f64},
-			LensMonitorFieldSnapshot{Name: "boolSlice", Val: boolSlice},
-			LensMonitorFieldSnapshot{Name: "uiSlice", Val: uiSlice},
-			LensMonitorFieldSnapshot{Name: "iSlice", Val: iSlice},
-			LensMonitorFieldSnapshot{Name: "fSlice", Val: fSlice},
-			LensMonitorFieldSnapshot{Name: "sSlice", Val: sSlice},
-			LensMonitorFieldSnapshot{Name: "bSlice", Val: bSlice},
-			LensMonitorFieldSnapshot{Name: "pointMap", Val: pointMap},
-			LensMonitorFieldSnapshot{Name: "monitor", Val: monitor},
-			LensMonitorFieldSnapshot{Name: "srv", Val: srv})
+		sendLensPointMessage(1)
+		sendLensPointStateMessage(2,
+			lensMonitorFieldSnapshot{Name: "b", Val: b},
+			lensMonitorFieldSnapshot{Name: "u32", Val: u32},
+			lensMonitorFieldSnapshot{Name: "u64", Val: u64},
+			lensMonitorFieldSnapshot{Name: "i32", Val: i32},
+			lensMonitorFieldSnapshot{Name: "i64", Val: i64},
+			lensMonitorFieldSnapshot{Name: "f32", Val: f32},
+			lensMonitorFieldSnapshot{Name: "f64", Val: f64},
+			lensMonitorFieldSnapshot{Name: "f64", Val: f64},
+			lensMonitorFieldSnapshot{Name: "boolSlice", Val: boolSlice},
+			lensMonitorFieldSnapshot{Name: "uiSlice", Val: uiSlice},
+			lensMonitorFieldSnapshot{Name: "iSlice", Val: iSlice},
+			lensMonitorFieldSnapshot{Name: "fSlice", Val: fSlice},
+			lensMonitorFieldSnapshot{Name: "sSlice", Val: sSlice},
+			lensMonitorFieldSnapshot{Name: "bSlice", Val: bSlice},
+			lensMonitorFieldSnapshot{Name: "pointMap", Val: pointMap},
+			lensMonitorFieldSnapshot{Name: "monitor", Val: monitor},
+			lensMonitorFieldSnapshot{Name: "srv", Val: srv})
+		sendLensPointRecoveryMessage(3, errors.New("fake failure"))
 
-		monitor.waitForMsgs(2)
+		monitor.waitForMsgs(3)
 	}
 	b.StopTimer()
 }
@@ -197,14 +199,15 @@ func BenchmarkASTClientServerMonitor(b *testing.B) {
 		err = srv.SetPointHandler(benchMonitor)
 		require.NoError(b, err)
 
-		SendLensPointMessage(1)
-		SendLensPointStateMessage(2,
-			LensMonitorFieldSnapshot{Name: "b", Val: b},
-			LensMonitorFieldSnapshot{Name: "pointMap", Val: pointMap},
-			LensMonitorFieldSnapshot{Name: "monitor", Val: monitor},
-			LensMonitorFieldSnapshot{Name: "srv", Val: srv})
+		sendLensPointMessage(1)
+		sendLensPointStateMessage(2,
+			lensMonitorFieldSnapshot{Name: "b", Val: b},
+			lensMonitorFieldSnapshot{Name: "pointMap", Val: pointMap},
+			lensMonitorFieldSnapshot{Name: "monitor", Val: monitor},
+			lensMonitorFieldSnapshot{Name: "srv", Val: srv})
+		sendLensPointRecoveryMessage(3, errors.New("fake failure"))
 
-		benchMonitor.waitForMsgs(2)
+		benchMonitor.waitForMsgs(3)
 		monitor.wait.Wait() // wait till monitor processing completes
 	}
 	b.StopTimer()

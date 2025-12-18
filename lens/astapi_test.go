@@ -491,7 +491,7 @@ func TestLensEncodeDecodeMessagePoint(t *testing.T) {
 
 	t.Run("empty_stack", func(t *testing.T) {
 		var buf bytes.Buffer
-		lensEncodeMessagePoint(&buf, 42, 1234567890, []LensMonitorStackFrame{})
+		lensEncodeMessagePoint(&buf, 42, 1234567890, []lensMonitorStackFrame{})
 		decoded, err := newLensReader(&buf, 1024).decodeMessagePoint()
 		require.NoError(t, err)
 		assert.Equal(t, uint32(42), decoded.PointID)
@@ -501,7 +501,7 @@ func TestLensEncodeDecodeMessagePoint(t *testing.T) {
 
 	t.Run("with_stack_frames", func(t *testing.T) {
 		var buf bytes.Buffer
-		stack := []LensMonitorStackFrame{
+		stack := []lensMonitorStackFrame{
 			{File: "main.go", Function: "main.main", Line: 10},
 			{File: "handler.go", Function: "pkg.Handle", Line: 25},
 		}
@@ -533,7 +533,7 @@ func TestLensEncodeDecodeMessagePointState(t *testing.T) {
 
 	t.Run("empty_fields", func(t *testing.T) {
 		var buf bytes.Buffer
-		lensEncodeMessagePointState(&buf, 10, 5000, []LensMonitorStackFrame{}, nil)
+		lensEncodeMessagePointState(&buf, 10, 5000, []lensMonitorStackFrame{}, nil)
 		decoded, err := newLensReader(&buf, 1024).decodeMessagePointState()
 		require.NoError(t, err)
 		assert.Equal(t, uint32(10), decoded.PointID)
@@ -544,10 +544,10 @@ func TestLensEncodeDecodeMessagePointState(t *testing.T) {
 
 	t.Run("with_fields", func(t *testing.T) {
 		var buf bytes.Buffer
-		stack := []LensMonitorStackFrame{
+		stack := []lensMonitorStackFrame{
 			{File: "test.go", Function: "Test", Line: 100},
 		}
-		snaps := []LensMonitorFieldSnapshot{
+		snaps := []lensMonitorFieldSnapshot{
 			{Name: "x", Val: int64(1)},
 			{Name: "y", Val: "hello"},
 		}
@@ -565,7 +565,7 @@ func TestLensEncodeDecodeMessagePointState(t *testing.T) {
 
 	t.Run("fields_with_special_floats", func(t *testing.T) {
 		var buf bytes.Buffer
-		snaps := []LensMonitorFieldSnapshot{
+		snaps := []lensMonitorFieldSnapshot{
 			{Name: "nan", Val: math.NaN()},
 			{Name: "inf", Val: math.Inf(1)},
 		}
@@ -616,7 +616,7 @@ func TestLensEncodeDecodeMessageError(t *testing.T) {
 
 	t.Run("simple_error", func(t *testing.T) {
 		var buf bytes.Buffer
-		lensEncodeMessageError(&buf, 50, errors.New("failed to process"), []LensMonitorStackFrame{})
+		lensEncodeMessageError(&buf, 50, errors.New("failed to process"), []lensMonitorStackFrame{})
 		decoded, err := newLensReader(&buf, 1024).decodeMessageError()
 		require.NoError(t, err)
 		assert.Equal(t, uint32(50), decoded.PointID)
@@ -626,7 +626,7 @@ func TestLensEncodeDecodeMessageError(t *testing.T) {
 
 	t.Run("with_stack", func(t *testing.T) {
 		var buf bytes.Buffer
-		stack := []LensMonitorStackFrame{
+		stack := []lensMonitorStackFrame{
 			{File: "error.go", Function: "handleError", Line: 50},
 		}
 		lensEncodeMessageError(&buf, 60, errors.New("error occurred"), stack)

@@ -55,7 +55,7 @@ func TestASTServerHandlePoint(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		var buf bytes.Buffer
-		lensEncodeMessagePoint(&buf, 1, 12345, []LensMonitorStackFrame{})
+		lensEncodeMessagePoint(&buf, 1, 12345, []lensMonitorStackFrame{})
 		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathPoint, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
@@ -91,7 +91,7 @@ func TestASTServerHandlePointState(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		var buf bytes.Buffer
-		lensEncodeMessagePointState(&buf, 1, 12345, []LensMonitorStackFrame{}, nil)
+		lensEncodeMessagePointState(&buf, 1, 12345, []lensMonitorStackFrame{}, nil)
 		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathState, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
@@ -163,7 +163,7 @@ func TestASTServerHandleEventError(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		var buf bytes.Buffer
-		lensEncodeMessageError(&buf, 1, errors.New("test error"), []LensMonitorStackFrame{})
+		lensEncodeMessageError(&buf, 1, errors.New("test error"), []lensMonitorStackFrame{})
 		req := httptest.NewRequest(http.MethodPost, lensMonitorEndpointPathError, &buf)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)

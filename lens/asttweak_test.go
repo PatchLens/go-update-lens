@@ -9,6 +9,7 @@ import (
 	"go/printer"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -19,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const sendLensPointStateMessageFunc = "SendLensPointStateMessage"
+const sendLensPointStateMessageFunc = "sendLensPointStateMessage"
 
 func countFunctionCalls(t *testing.T, src []byte, funcName string) int {
 	t.Helper()
@@ -892,7 +893,7 @@ func GetPtr() *int {
 				[]ast.Expr{resultType}, nil, []string{""})
 			require.NoError(t, err)
 
-			// Format the block to ensure it's valid Go code
+			// Format the block to ensure it is a valid Go code
 			var genBuf bytes.Buffer
 			err = format.Node(&genBuf, token.NewFileSet(), blk)
 			require.NoError(t, err)
@@ -2237,8 +2238,7 @@ import "fmt"
 		})
 	}
 
-	t.Run("Ellipsis", func(t *testing.T) {
-		// Test that ellipsis arguments are handled correctly
+	t.Run("ellipsis", func(t *testing.T) {
 		src := "append(slice, elements...)"
 		call, err := parser.ParseExpr(src)
 		require.NoError(t, err)
@@ -3820,5 +3820,253 @@ func GetBlank() (_ string) {
 		// Should compile
 		_, err = parser.ParseFile(fset, "test.go", outputStr, 0)
 		require.NoError(t, err)
+	})
+}
+
+func TestInjectASTClient(t *testing.T) {
+	t.Parallel()
+
+	t.Run("basic_injection", func(t *testing.T) {
+		dir := t.TempDir()
+		src := `package testpkg
+
+func Foo() int {
+	return 42
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		// Verify client file was created
+		_, err = os.Stat(filepath.Join(dir, "xx_lens_client_gen.go"))
+		require.NoError(t, err)
+
+		// Verify API file was created
+		_, err = os.Stat(filepath.Join(dir, "xx_lens_api_gen.go"))
+		require.NoError(t, err)
+	})
+
+	t.Run("skip_already_injected", func(t *testing.T) {
+		dir := t.TempDir()
+		src := `package testpkg
+
+func Foo() int {
+	return 42
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(src), 0644))
+
+		mod := &ASTModifier{}
+
+		// First injection
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		// Second injection should be skipped (no error)
+		err = mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+	})
+
+	// Dot-import symbol collision bug
+	// When package A dot-imports package B, and both have lens client files injected,
+	// the exported symbols (SendLensPointMessage, etc.) collide.
+	t.Run("dot_import_symbol_collision", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skip in short mode")
+		}
+
+		dir := t.TempDir()
+		pkgADir := filepath.Join(dir, "pkga")
+		pkgBDir := filepath.Join(dir, "pkgb")
+
+		require.NoError(t, os.MkdirAll(pkgADir, 0755))
+		require.NoError(t, os.MkdirAll(pkgBDir, 0755))
+
+		// Package B - a simple package
+		pkgBSrc := `package pkgb
+
+func DoSomething() string {
+	return "hello"
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(pkgBDir, "pkgb.go"), []byte(pkgBSrc), 0644))
+
+		// Package A - dot-imports Package B
+		pkgASrc := `package pkga
+
+import . "example.com/test/pkgb"
+
+func UseIt() string {
+	return DoSomething()
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(pkgADir, "pkga.go"), []byte(pkgASrc), 0644))
+
+		// Create go.mod at root
+		goMod := `module example.com/test
+
+go 1.21
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		mod := &ASTModifier{}
+
+		// Inject into pkgB (no error expected)
+		err := mod.InjectASTClient(pkgBDir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		// Inject into pkgA (should detect conflict and handle it)
+		err = mod.InjectASTClient(pkgADir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		// Verify both packages have injected files
+		_, err = os.Stat(filepath.Join(pkgBDir, "xx_lens_client_gen.go"))
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(pkgADir, "xx_lens_client_gen.go"))
+		require.NoError(t, err)
+
+		cmd := exec.Command("go", "build", "./...")
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+
+		outputStr := string(output)
+		if strings.Contains(outputStr, "already declared through dot-import") ||
+			strings.Contains(outputStr, "sendLensPointMessage") {
+			t.Errorf("Dot-import symbol collision.\nBuild output:\n%s", outputStr)
+		}
+		require.NoError(t, err, "Build failed with different error: %s", outputStr)
+	})
+
+	t.Run("go_version_injection", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Create go.mod with Go 1.18 (above minimum)
+		goMod := `module newmodule
+go 1.18
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		// Create a simple Go file
+		src := `package newmodule
+
+func Hello() string {
+	return "hello"
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+
+		// Should succeed
+		require.NoError(t, err)
+
+		// Verify files were created
+		_, err = os.Stat(filepath.Join(dir, "xx_lens_client_gen.go"))
+		require.NoError(t, err)
+	})
+}
+
+func TestInjectFuncPointEntry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("basic_injection", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		src := `package testpkg
+
+func Foo() int {
+	return 42
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:Foo",
+			FunctionName:  "Foo",
+		}
+
+		pointID, err := mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+		assert.Positive(t, pointID)
+	})
+
+	t.Run("method_injection", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		src := `package testpkg
+
+type MyType struct{}
+
+func (m *MyType) Method() int {
+	return 42
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:*MyType.Method",
+			FunctionName:  "Method",
+		}
+
+		pointID, err := mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+		assert.Positive(t, pointID)
+	})
+
+	// Assembly-only function injection failure bug
+	// Functions implemented in assembly (.s files) have Body == nil in the AST.
+	// The error message incorrectly says "not found" instead of "no body".
+	t.Run("assembly_only_function", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Go file with assembly-only function (no body, like golang.org/x/crypto/sha3:keccakF1600)
+		asmSrc := `package testpkg
+
+//go:noescape
+func keccakF1600(state *[25]uint64)
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "asm.go"), []byte(asmSrc), 0644))
+
+		// Need a non-assembly file for detectPackageName
+		normalSrc := `package testpkg
+
+func NormalFunc() int {
+	return 42
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "normal.go"), []byte(normalSrc), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filepath.Join(dir, "asm.go"),
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:keccakF1600",
+			FunctionName:  "keccakF1600",
+		}
+
+		// Try to inject - this should fail with ErrNoFunctionBody
+		_, err = mod.InjectFuncPointEntry(fn)
+		require.Error(t, err)
+		assert.True(t, IsNormalAstError(err), "Expected IsNormalAstError to return true for assembly-only function, got error: %v", err)
+		assert.ErrorIs(t, err, ErrNoFunctionBody, "Expected ErrNoFunctionBody sentinel error")
 	})
 }

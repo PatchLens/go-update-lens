@@ -11,8 +11,8 @@ const (
 // and accepted by the server. This is a safety limit to prevent OOM from malformed data.
 const lensMonitorMaxStackFrames = 2048
 
-// LensMonitorStackFrame holds a single frame in the call stack.
-type LensMonitorStackFrame struct {
+// lensMonitorStackFrame holds a single frame in the call stack.
+type lensMonitorStackFrame struct {
 	File     string // source file path
 	Function string // function name
 	Line     uint

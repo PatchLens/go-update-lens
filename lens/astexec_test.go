@@ -569,3 +569,103 @@ func TestTrimStackFile(t *testing.T) {
 	got = trimStackFile(dir, "", mod)
 	assert.Equal(t, "github.com/foo@v1.0.0/bar.go", got)
 }
+
+func TestFilterModulesByGoVersion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skip_old_go_version", func(t *testing.T) {
+		t.Parallel()
+
+		oldModule := &ModuleChange{Name: "old/module", GoVersion: "1.12"}
+		newModule := &ModuleChange{Name: "new/module", GoVersion: "1.18"}
+
+		reachable := ReachableModuleChange{
+			"old/module.OldFunc": &ModuleFunction{
+				Function: Function{FunctionIdent: "old/module.OldFunc"},
+				Module:   oldModule,
+			},
+			"new/module.NewFunc": &ModuleFunction{
+				Function: Function{FunctionIdent: "new/module.NewFunc"},
+				Module:   newModule,
+			},
+		}
+
+		filtered, skipped := FilterModulesByGoVersion(reachable)
+
+		assert.Equal(t, 1, skipped)
+		assert.Len(t, filtered, 1)
+		assert.Equal(t, "new/module.NewFunc", filtered[0].FunctionIdent)
+	})
+
+	t.Run("skip_multiple_functions_same_module", func(t *testing.T) {
+		t.Parallel()
+
+		oldModule := &ModuleChange{Name: "old/module", GoVersion: "1.12"}
+
+		reachable := ReachableModuleChange{
+			"old/module.Func1": &ModuleFunction{
+				Function: Function{FunctionIdent: "old/module.Func1"},
+				Module:   oldModule,
+			},
+			"old/module.Func2": &ModuleFunction{
+				Function: Function{FunctionIdent: "old/module.Func2"},
+				Module:   oldModule,
+			},
+			"old/module.Func3": &ModuleFunction{
+				Function: Function{FunctionIdent: "old/module.Func3"},
+				Module:   oldModule,
+			},
+		}
+
+		filtered, skipped := FilterModulesByGoVersion(reachable)
+
+		assert.Equal(t, 3, skipped)
+		assert.Empty(t, filtered)
+	})
+
+	t.Run("keep_all_with_new_versions", func(t *testing.T) {
+		t.Parallel()
+
+		mod13 := &ModuleChange{Name: "mod13", GoVersion: "1.13"}
+		mod18 := &ModuleChange{Name: "mod18", GoVersion: "1.18"}
+		mod21 := &ModuleChange{Name: "mod21", GoVersion: "1.21"}
+
+		reachable := ReachableModuleChange{
+			"mod13.Func": &ModuleFunction{
+				Function: Function{FunctionIdent: "mod13.Func"},
+				Module:   mod13,
+			},
+			"mod18.Func": &ModuleFunction{
+				Function: Function{FunctionIdent: "mod18.Func"},
+				Module:   mod18,
+			},
+			"mod21.Func": &ModuleFunction{
+				Function: Function{FunctionIdent: "mod21.Func"},
+				Module:   mod21,
+			},
+		}
+
+		filtered, skipped := FilterModulesByGoVersion(reachable)
+
+		assert.Equal(t, 0, skipped)
+		assert.Len(t, filtered, 3)
+	})
+
+	t.Run("keep_module_with_empty_go_version", func(t *testing.T) {
+		t.Parallel()
+
+		modNoVersion := &ModuleChange{Name: "mod/noversion", GoVersion: ""}
+
+		reachable := ReachableModuleChange{
+			"mod/noversion.Func": &ModuleFunction{
+				Function: Function{FunctionIdent: "mod/noversion.Func"},
+				Module:   modNoVersion,
+			},
+		}
+
+		filtered, skipped := FilterModulesByGoVersion(reachable)
+
+		assert.Equal(t, 0, skipped)
+		assert.Len(t, filtered, 1)
+	})
+}

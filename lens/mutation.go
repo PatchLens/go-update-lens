@@ -100,12 +100,16 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 				mutationFiles = append(mutationFiles, abs)
 			}
 			errGrp.Go(func() error {
-				return astEditor.InsertFuncLines(&change.Function, func(i int, line string) (string, bool) {
+				err := astEditor.InsertFuncLines(&change.Function, func(i int, line string) (string, bool) {
 					if i < len(change.LineChangeBitmap) && !change.LineChangeBitmap[i] {
 						return "// mutator-disable-next-line *", true
 					}
 					return "", true
 				})
+				if IsNormalAstError(err) {
+					return nil
+				}
+				return err
 			})
 		}
 		if err := errGrp.Wait(); err != nil {
