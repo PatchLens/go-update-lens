@@ -424,8 +424,10 @@ func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, 
 	// versionsMap collects every version seen for each module path
 	versionsMap := make(map[string][]string)
 	var oldestGoVersion string
+	var foundModule bool
 
 	if FileExists(rootMod) { // root module if present
+		foundModule = true
 		rootDeps, goVer, err := parseGoMod(rootMod)
 		if err != nil {
 			return nil, "", err
@@ -446,6 +448,7 @@ func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, 
 			if _, err := os.Stat(gm); err != nil {
 				continue // skip missing or unreadable module rather than failing the whole parse
 			}
+			foundModule = true
 			mdeps, goVer, err := parseGoMod(gm)
 			if err != nil {
 				return nil, "", err
@@ -474,7 +477,7 @@ func parseProjectDeps(projectDir string, preferNewest bool) (map[string]string, 
 		}
 		deps[modPath] = chosen
 	}
-	if len(deps) == 0 {
+	if !foundModule {
 		return nil, "", fmt.Errorf("no go.mod or go.work found in %s", projectDir)
 	}
 	return deps, oldestGoVersion, nil
