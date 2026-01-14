@@ -6,7 +6,7 @@ build:
 	@mkdir -p bin
 	for dir in $$(find . -type f -name 'main.go' | xargs -n 1 dirname); do \
 	base=$$(basename $$dir); \
-	go build -o bin/$$base $$dir; \
+	go build -ldflags="-w -s" -o bin/$$base $$dir; \
 	done
 
 PLATFORMS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
@@ -21,7 +21,7 @@ build-cross:
 			ext=""; \
 			if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
 			echo "Building $$base for $$os/$$arch..."; \
-			GOOS=$$os GOARCH=$$arch go build -o bin/$$base-$$platform$$ext $$dir; \
+			GOOS=$$os GOARCH=$$arch go build -ldflags="-w -s" -o bin/$$base-$$platform$$ext $$dir; \
 		done; \
 	done
 
