@@ -1084,6 +1084,13 @@ func buildCallInstrumentationWithArgs(buf *bytes.Buffer, pointID uint32, call *a
 			continue
 		}
 
+		// Constant expressions: capture but don't replace to preserve untyped semantics.
+		// Extracting "1440 * 1024" to a variable would turn untyped int into int.
+		if isConstantExpr(origArg) {
+			snaps = append(snaps, makeSnapshotLitWithCustomName(fmt.Sprintf("arg%d", i), origArg))
+			continue
+		}
+
 		// Complex expressions: create synthetic variable and replace
 		argVarName := fmt.Sprintf("%s%d_%d", syntheticFieldNamePrefixArg, pointID, i)
 		argIdent := ast.NewIdent(argVarName)
@@ -1759,6 +1766,22 @@ func exprContainsTypeShadow(expr ast.Expr, typ ast.Expr) bool {
 	})
 
 	return foundShadow
+}
+
+// isConstantExpr reports whether expr consists only of compile-time constants.
+func isConstantExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return true
+	case *ast.BinaryExpr:
+		return isConstantExpr(e.X) && isConstantExpr(e.Y)
+	case *ast.UnaryExpr:
+		return isConstantExpr(e.X)
+	case *ast.ParenExpr:
+		return isConstantExpr(e.X)
+	default:
+		return false
+	}
 }
 
 // isRecursiveCall reports whether expr is a direct call to the function itself.

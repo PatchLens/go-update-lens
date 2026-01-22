@@ -22,6 +22,11 @@ import (
 
 const sendLensPointStateMessageFunc = "sendLensPointStateMessage"
 
+const testGoMod = `module testmod
+
+go 1.21
+`
+
 func countFunctionCalls(t *testing.T, src []byte, funcName string) int {
 	t.Helper()
 
@@ -2266,6 +2271,125 @@ import "fmt"
 		// Should reference the underlying element expression, not the ellipsis itself
 		assert.Contains(t, generated, "elements")
 	})
+
+	// Test for untyped constant expressions - these should NOT be extracted to synthetic variables
+	// because doing so changes their type from "untyped int" to "int", breaking calls to functions
+	// expecting int64 (like File.Truncate).
+	t.Run("binary_expr_constant", func(t *testing.T) {
+		// This simulates: f.Truncate(1440 * 1024)
+		// The argument 1440 * 1024 is an untyped constant expression that must remain inline
+		src := "target(1440 * 1024)"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
+
+		// The call argument should NOT be replaced with a synthetic variable
+		// It should still be the original BinaryExpr
+		assert.IsType(t, &ast.BinaryExpr{}, callExpr.Args[0])
+
+		// Verify the snapshot still captures the value
+		monitorStmt := stmts[len(stmts)-1]
+		exprStmt, ok := monitorStmt.(*ast.ExprStmt)
+		require.True(t, ok)
+		monitorCall, ok := exprStmt.X.(*ast.CallExpr)
+		require.True(t, ok)
+
+		// Should have point ID + 1 snapshot
+		assert.Len(t, monitorCall.Args, 2)
+	})
+
+	t.Run("unary_expr_constant", func(t *testing.T) {
+		// Test: target(-42) - unary expression with constant operand
+		src := "target(-42)"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
+
+		// The call argument should NOT be replaced with a synthetic variable
+		assert.IsType(t, &ast.UnaryExpr{}, callExpr.Args[0])
+	})
+
+	t.Run("paren_expr_constant", func(t *testing.T) {
+		// Test: target((5 + 3)) - parenthesized constant expression
+		src := "target((5 + 3))"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
+
+		// The call argument should NOT be replaced with a synthetic variable
+		assert.IsType(t, &ast.ParenExpr{}, callExpr.Args[0])
+	})
+
+	t.Run("shift_expr_constant", func(t *testing.T) {
+		// Test: target(1 << 20) - shift expression with constant operands
+		// This is a common pattern (e.g., 1 << 20 for 1MB) that must preserve untyped semantics
+		src := "target(1 << 20)"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
+
+		// The call argument should NOT be replaced with a synthetic variable
+		assert.IsType(t, &ast.BinaryExpr{}, callExpr.Args[0])
+	})
+
+	t.Run("nested_constant_expr", func(t *testing.T) {
+		// Test: target(-(1 + 2) * 3) - nested constant expression
+		src := "target(-(1 + 2) * 3)"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
+
+		// The call argument should NOT be replaced with a synthetic variable
+		assert.IsType(t, &ast.BinaryExpr{}, callExpr.Args[0])
+	})
+
+	t.Run("mixed_constant_and_variable", func(t *testing.T) {
+		// Test: target(x + 1) - NOT a constant expression (contains variable)
+		src := "target(x + 1)"
+		call, err := parser.ParseExpr(src)
+		require.NoError(t, err)
+		callExpr, ok := call.(*ast.CallExpr)
+		require.True(t, ok)
+
+		var buf bytes.Buffer
+		stmts, err := buildCallInstrumentationWithArgs(&buf, 42, callExpr, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stmts)
+
+		// The call argument SHOULD be replaced with a synthetic variable
+		// because it contains a variable reference
+		assert.IsType(t, &ast.Ident{}, callExpr.Args[0])
+	})
 }
 
 func TestMakeSnapshotLitWithArgPrefix(t *testing.T) {
@@ -4029,9 +4153,417 @@ func (m *MyType) Method() int {
 		assert.Positive(t, pointID)
 	})
 
-	// Assembly-only function injection failure bug
-	// Functions implemented in assembly (.s files) have Body == nil in the AST.
-	// The error message incorrectly says "not found" instead of "no body".
+	t.Run("multiline_call", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Source with a multi-line function call - arguments on separate lines
+		src := `package testpkg
+
+func target(a, b, c, d int) int {
+	return a + b + c + d
+}
+
+func getValue() int {
+	return 42
+}
+
+func Process() int {
+	return target(
+		1,
+		getValue(),
+		3,
+		4,
+	)
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:Process",
+			FunctionName:  "Process",
+		}
+
+		// Inject instrumentation before the target call
+		_, err = mod.InjectFuncPointBeforeCall(fn, func(call *ast.CallExpr) (any, bool) {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return struct{}{}, ident.Name == "target"
+			}
+			return struct{}{}, false
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		code := string(modifiedSrc)
+		assert.Contains(t, code, "sendLensPointStateMessage")
+		assert.Contains(t, code, "lenSyntheticArg")
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("composite_literal", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Source with composite literal arguments spanning multiple lines
+		src := `package testpkg
+
+type Config struct {
+	A int
+	B string
+	C float64
+}
+
+func target(cfg Config, x int) int {
+	return cfg.A + x
+}
+
+func Process() int {
+	return target(Config{
+		A: 1,
+		B: "test",
+		C: 3.14,
+	}, 42)
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:Process",
+			FunctionName:  "Process",
+		}
+
+		_, err = mod.InjectFuncPointBeforeCall(fn, func(call *ast.CallExpr) (any, bool) {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return struct{}{}, ident.Name == "target"
+			}
+			return struct{}{}, false
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("nested_calls", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Source mimicking complex CGo patterns with nested calls
+		src := `package testpkg
+
+func outer(a, b, c int) int {
+	return a + b + c
+}
+
+func inner1() int { return 1 }
+func inner2() int { return 2 }
+func inner3() int { return 3 }
+
+func Process() int {
+	return outer(
+		inner1(),
+		inner2(),
+		inner3(),
+	)
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:Process",
+			FunctionName:  "Process",
+		}
+
+		_, err = mod.InjectFuncPointBeforeCall(fn, func(call *ast.CallExpr) (any, bool) {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return struct{}{}, ident.Name == "outer"
+			}
+			return struct{}{}, false
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("cgo_style", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Source mimicking CGo patterns - arguments on same line with different position info
+		src := `package testpkg
+
+func ccgoCall(a, b, c, d, e, f, g int) int { return a }
+
+func Process() int {
+	return ccgoCall(1, 2, 3,
+		4, 5, 6,
+		7)
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:Process",
+			FunctionName:  "Process",
+		}
+
+		_, err = mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("no_trailing_comma", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Multi-line call where closing paren is on same line as last arg (no trailing comma needed)
+		// But internal lines have arguments without trailing commas
+		src := `package testpkg
+
+func multiArg(a, b, c int) int { return a + b + c }
+
+func Process() int {
+	return multiArg(
+		1,
+		2,
+		3)
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:Process",
+			FunctionName:  "Process",
+		}
+
+		_, err = mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("multiple_functions", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Source with multiple functions containing multi-line calls
+		src := `package testpkg
+
+func helper(a, b, c int) int { return a + b + c }
+
+func Func1() int {
+	return helper(
+		1,
+		2,
+		3,
+	)
+}
+
+func Func2() int {
+	return helper(
+		4,
+		5,
+		6,
+	)
+}
+
+func Func3() int {
+	return helper(
+		7,
+		8,
+		9,
+	)
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		// Modify multiple functions in sequence (like module handling does)
+		functions := []string{"Func1", "Func2", "Func3"}
+		for _, fnName := range functions {
+			fn := &Function{
+				FilePath:      filePath,
+				PackageName:   "testpkg",
+				FunctionIdent: "testpkg:" + fnName,
+				FunctionName:  fnName,
+			}
+
+			_, err = mod.InjectFuncPointEntry(fn)
+			require.NoError(t, err)
+
+			_, err = mod.InjectFuncPointPanic(fn)
+			require.NoError(t, err)
+		}
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		assert.Equal(t, 3, countFunctionCalls(t, modifiedSrc, "sendLensPointMessage"))
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
+	t.Run("snapshot_multiline", func(t *testing.T) {
+		// Parse a multi-line expression to get position info
+		src := `package test
+
+func foo() {
+	x := Config{
+		A: 1,
+		B: "test",
+		C: 3.14,
+	}
+	_ = x
+}
+`
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "test.go", src, 0)
+		require.NoError(t, err)
+
+		// Find the composite literal
+		var compositeLit *ast.CompositeLit
+		ast.Inspect(file, func(n ast.Node) bool {
+			if cl, ok := n.(*ast.CompositeLit); ok {
+				compositeLit = cl
+				return false
+			}
+			return true
+		})
+		require.NotNil(t, compositeLit)
+
+		snapshot := makeSnapshotLit("x", compositeLit)
+
+		var buf bytes.Buffer
+		err = format.Node(&buf, token.NewFileSet(), snapshot)
+		require.NoError(t, err)
+	})
+
+	t.Run("cgo_transpiled", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "test.go")
+		// Source mimicking CGo-transpiled code with very long complex expressions
+		src := `package testpkg
+
+import "unsafe"
+
+type TDateTime struct {
+	FiJD     int64
+	FvalidJD int8
+}
+
+func helper(a, b, c, d, e, f, g int) int { return a }
+
+func _clearYMD_HMS_TZ(p uintptr) {}
+func _sqlite3StmtCurrentTime(context uintptr) int64 { return 0 }
+
+func _setDateTimeToCurrent(context uintptr, p uintptr) (r int32) {
+	(*TDateTime)(unsafe.Pointer(p)).FiJD = _sqlite3StmtCurrentTime(context)
+	if (*TDateTime)(unsafe.Pointer(p)).FiJD > 0 {
+		(*TDateTime)(unsafe.Pointer(p)).FvalidJD = int8(1)
+		helper(int((*TDateTime)(unsafe.Pointer(p)).FiJD), 1, 3, 0x8, int((*TDateTime)(unsafe.Pointer(p)).FvalidJD), 4, 0x10)
+		_clearYMD_HMS_TZ(p)
+		return 0
+	} else {
+		return int32(1)
+	}
+	return r
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testpkg",
+			FunctionIdent: "testpkg:_setDateTimeToCurrent",
+			FunctionName:  "_setDateTimeToCurrent",
+		}
+
+		_, err = mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+
+		_, err = mod.InjectFuncPointPanic(fn)
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, 0)
+		require.NoError(t, err)
+	})
+
 	t.Run("assembly_only_function", func(t *testing.T) {
 		dir := t.TempDir()
 
@@ -4066,7 +4598,438 @@ func NormalFunc() int {
 		// Try to inject - this should fail with ErrNoFunctionBody
 		_, err = mod.InjectFuncPointEntry(fn)
 		require.Error(t, err)
-		assert.True(t, IsNormalAstError(err), "Expected IsNormalAstError to return true for assembly-only function, got error: %v", err)
-		assert.ErrorIs(t, err, ErrNoFunctionBody, "Expected ErrNoFunctionBody sentinel error")
+		assert.True(t, IsNormalAstError(err))
+		assert.ErrorIs(t, err, ErrNoFunctionBody)
+	})
+}
+
+// TestCompilerDirectivePreservation verifies that compiler directives (//go:embed, //go:noinline, etc.)
+// remain correctly positioned after AST modification and commit.
+// This is a regression test for the fresh FileSet change in loadParsedFileNode.
+func TestCompilerDirectivePreservation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("go_embed_directive", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skip in short mode")
+		}
+
+		dir := t.TempDir()
+
+		// Create go.mod
+		goMod := testGoMod
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		// Create a file to embed
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "data.txt"), []byte("hello"), 0644))
+
+		// Create source with //go:embed directive - directive must be immediately before var
+		src := `package testmod
+
+import _ "embed"
+
+//go:embed data.txt
+var content string
+
+func GetContent() string {
+	return content
+}
+`
+		filePath := filepath.Join(dir, "main.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testmod",
+			FunctionIdent: "testmod:GetContent",
+			FunctionName:  "GetContent",
+		}
+
+		// Inject instrumentation
+		pointID, err := mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+		assert.Positive(t, pointID)
+
+		// Commit the modified file
+		require.NoError(t, mod.CommitFile(filePath))
+
+		// Read the modified file
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		// Verify the file still parses
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.ParseComments)
+		require.NoError(t, err, "Modified file should parse: %s", string(modifiedSrc))
+
+		// Verify the file compiles (catches "misplaced compiler directive" errors)
+		cmd := exec.Command("go", "build", ".")
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Build failed with: %s\n\nModified source:\n%s", string(output), string(modifiedSrc))
+	})
+
+	t.Run("go_noinline_directive", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skip in short mode")
+		}
+
+		dir := t.TempDir()
+
+		// Create go.mod
+		goMod := testGoMod
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		// Create source with //go:noinline directive
+		src := `package testmod
+
+//go:noinline
+func NoInlineFunc() int {
+	return 42
+}
+
+func Caller() int {
+	return NoInlineFunc()
+}
+`
+		filePath := filepath.Join(dir, "main.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testmod",
+			FunctionIdent: "testmod:Caller",
+			FunctionName:  "Caller",
+		}
+
+		// Inject instrumentation into Caller (not NoInlineFunc)
+		pointID, err := mod.InjectFuncPointEntry(fn)
+		require.NoError(t, err)
+		assert.Positive(t, pointID)
+
+		// Commit the modified file
+		require.NoError(t, mod.CommitFile(filePath))
+
+		// Read the modified file
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		// Verify the file still parses
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.ParseComments)
+		require.NoError(t, err, "Modified file should parse: %s", string(modifiedSrc))
+
+		// Verify the directive is on the line immediately before the function
+		lines := strings.Split(string(modifiedSrc), "\n")
+		foundDirective := false
+		for i, line := range lines {
+			if strings.TrimSpace(line) == "//go:noinline" {
+				foundDirective = true
+				// Next non-empty line should be the func declaration
+				for j := i + 1; j < len(lines); j++ {
+					nextLine := strings.TrimSpace(lines[j])
+					if nextLine == "" {
+						continue
+					}
+					assert.True(t, strings.HasPrefix(nextLine, "func NoInlineFunc"),
+						"//go:noinline should be immediately before func NoInlineFunc, but found: %s", nextLine)
+					break
+				}
+			}
+		}
+		assert.True(t, foundDirective)
+
+		// Verify the file compiles
+		cmd := exec.Command("go", "build", ".")
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Build failed with: %s\n\nModified source:\n%s", string(output), string(modifiedSrc))
+	})
+}
+
+// TestImportedTypeCompositeLiteral verifies that composite literals with imported package types
+// are handled correctly during AST modification. This is a regression test for the
+// "images.Image is not a type" error.
+func TestImportedTypeCompositeLiteral(t *testing.T) {
+	t.Parallel()
+
+	t.Run("imported_type_literal", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skip in short mode")
+		}
+
+		dir := t.TempDir()
+
+		// Create go.mod
+		goMod := testGoMod
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		// Create a separate package with types to import
+		typesDir := filepath.Join(dir, "images")
+		require.NoError(t, os.MkdirAll(typesDir, 0755))
+
+		typesSrc := `package images
+
+type Image struct {
+	Width  int
+	Height int
+	Data   []byte
+}
+
+type Gallery struct {
+	Images []Image
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(typesDir, "types.go"), []byte(typesSrc), 0644))
+
+		// Create main file that imports and uses these types in function calls
+		mainSrc := `package testmod
+
+import "testmod/images"
+
+func processImage(img images.Image) int {
+	return img.Width * img.Height
+}
+
+func processGallery(g images.Gallery) int {
+	return len(g.Images)
+}
+
+func CreateAndProcess() int {
+	// Call with composite literal using imported type
+	result1 := processImage(images.Image{
+		Width:  100,
+		Height: 200,
+	})
+
+	// Another call with nested composite literal
+	result2 := processGallery(images.Gallery{
+		Images: []images.Image{
+			{Width: 50, Height: 50},
+			{Width: 100, Height: 100},
+		},
+	})
+
+	return result1 + result2
+}
+`
+		filePath := filepath.Join(dir, "main.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(mainSrc), 0644))
+
+		// Verify the source compiles before modification
+		cmd := exec.Command("go", "build", ".")
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Original source should compile: %s", string(output))
+
+		mod := &ASTModifier{}
+		err = mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testmod",
+			FunctionIdent: "testmod:CreateAndProcess",
+			FunctionName:  "CreateAndProcess",
+		}
+
+		// Inject instrumentation before processImage and processGallery calls
+		_, err = mod.InjectFuncPointBeforeCall(fn, func(call *ast.CallExpr) (any, bool) {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return struct{}{}, ident.Name == "processImage" || ident.Name == "processGallery"
+			}
+			return struct{}{}, false
+		})
+		require.NoError(t, err)
+
+		// Commit the modified file
+		require.NoError(t, mod.CommitFile(filePath))
+
+		// Read the modified file
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		// Verify the file still parses
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.ParseComments)
+		require.NoError(t, err, "Modified file should parse: %s", string(modifiedSrc))
+
+		// Verify the file compiles (catches "is not a type" errors)
+		cmd = exec.Command("go", "build", ".")
+		cmd.Dir = dir
+		output, err = cmd.CombinedOutput()
+		require.NoError(t, err, "Build failed with: %s\n\nModified source:\n%s", string(output), string(modifiedSrc))
+	})
+
+	t.Run("pointer_to_imported_type", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skip in short mode")
+		}
+
+		dir := t.TempDir()
+
+		// Create go.mod
+		goMod := testGoMod
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		// Create a package with types
+		typesDir := filepath.Join(dir, "images")
+		require.NoError(t, os.MkdirAll(typesDir, 0755))
+
+		typesSrc := `package images
+
+type Image struct {
+	Width  int
+	Height int
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(typesDir, "types.go"), []byte(typesSrc), 0644))
+
+		// Create main file with pointer composite literals
+		mainSrc := `package testmod
+
+import "testmod/images"
+
+func processImagePtr(img *images.Image) int {
+	if img == nil {
+		return 0
+	}
+	return img.Width * img.Height
+}
+
+func CreateAndProcess() int {
+	// Call with pointer to composite literal using imported type
+	result := processImagePtr(&images.Image{
+		Width:  100,
+		Height: 200,
+	})
+	return result
+}
+`
+		filePath := filepath.Join(dir, "main.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(mainSrc), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testmod",
+			FunctionIdent: "testmod:CreateAndProcess",
+			FunctionName:  "CreateAndProcess",
+		}
+
+		// Inject instrumentation before processImagePtr call
+		_, err = mod.InjectFuncPointBeforeCall(fn, func(call *ast.CallExpr) (any, bool) {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return struct{}{}, ident.Name == "processImagePtr"
+			}
+			return struct{}{}, false
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		// Verify the file parses
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.ParseComments)
+		require.NoError(t, err, "Modified file should parse: %s", string(modifiedSrc))
+
+		// Verify the file compiles
+		cmd := exec.Command("go", "build", ".")
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Build failed with: %s\n\nModified source:\n%s", string(output), string(modifiedSrc))
+	})
+
+	t.Run("imported_type_assertion", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skip in short mode")
+		}
+
+		dir := t.TempDir()
+
+		goMod := testGoMod
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
+
+		typesDir := filepath.Join(dir, "images")
+		require.NoError(t, os.MkdirAll(typesDir, 0755))
+
+		typesSrc := `package images
+
+type Image struct {
+	Width  int
+	Height int
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(typesDir, "types.go"), []byte(typesSrc), 0644))
+
+		// Create main file with type assertions
+		mainSrc := `package testmod
+
+import "testmod/images"
+
+func processAny(v any) int {
+	if img, ok := v.(images.Image); ok {
+		return img.Width * img.Height
+	}
+	if imgPtr, ok := v.(*images.Image); ok {
+		return imgPtr.Width * imgPtr.Height
+	}
+	return 0
+}
+
+func CreateAndProcess() int {
+	img := images.Image{Width: 100, Height: 200}
+	return processAny(img)
+}
+`
+		filePath := filepath.Join(dir, "main.go")
+		require.NoError(t, os.WriteFile(filePath, []byte(mainSrc), 0644))
+
+		mod := &ASTModifier{}
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.NoError(t, err)
+
+		fn := &Function{
+			FilePath:      filePath,
+			PackageName:   "testmod",
+			FunctionIdent: "testmod:CreateAndProcess",
+			FunctionName:  "CreateAndProcess",
+		}
+
+		_, err = mod.InjectFuncPointBeforeCall(fn, func(call *ast.CallExpr) (any, bool) {
+			if ident, ok := call.Fun.(*ast.Ident); ok {
+				return struct{}{}, ident.Name == "processAny"
+			}
+			return struct{}{}, false
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, mod.CommitFile(filePath))
+
+		modifiedSrc, err := os.ReadFile(filePath)
+		require.NoError(t, err)
+
+		fset := token.NewFileSet()
+		_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.ParseComments)
+		require.NoError(t, err, "Modified file should parse: %s", string(modifiedSrc))
+
+		cmd := exec.Command("go", "build", ".")
+		cmd.Dir = dir
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "Build failed with: %s\n\nModified source:\n%s", string(output), string(modifiedSrc))
 	})
 }
