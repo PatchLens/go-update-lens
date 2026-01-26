@@ -1,14 +1,12 @@
 module github.com/PatchLens/go-update-lens
 
-go 1.25.0
-
-toolchain go1.25.4
+go 1.25.5
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.0
-	github.com/dgraph-io/ristretto/v2 v2.3.0
+	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/go-analyze/bulk v0.1.3
-	github.com/go-analyze/charts v0.5.23
+	github.com/go-analyze/charts v0.5.24
 	github.com/klauspost/compress v1.18.3
 	github.com/mtraver/base91 v1.0.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
@@ -32,7 +30,7 @@ require (
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
-	golang.org/x/image v0.24.0 // indirect
+	golang.org/x/image v0.35.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
