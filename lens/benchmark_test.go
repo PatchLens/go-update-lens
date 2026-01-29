@@ -132,7 +132,11 @@ func BenchmarkASTClientServer(b *testing.B) {
 	fSlice := []float64{-128.128, -128, -64.64, -64, -32.32, -32, -16.16, -16, -8.8, -8, -4.4, -4, -2.2, -2,
 		0, 0.0, 2, 2.2, 8, 8.8, 16, 16.16, 32, 32.32, 64, 64.64, 128, 128.128}
 	sSlice := []string{"foo", "bar", "hello world", "strings"}
-	var bSlice []byte
+	var bSliceSize int
+	for _, s := range sSlice {
+		bSliceSize += len(s)
+	}
+	bSlice := make([]byte, 0, bSliceSize)
 	for _, s := range sSlice {
 		bSlice = append(bSlice, s...)
 	}

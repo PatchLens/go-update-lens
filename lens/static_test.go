@@ -57,15 +57,15 @@ func TestReverseDFS(t *testing.T) {
 			errAt:     -1,
 			wantErr:   false,
 			wantChainsFn: func(start *callgraph.Node) [][]*callgraph.Node {
-				var chains [][]*callgraph.Node
+				chains := make([][]*callgraph.Node, 4)
 				// traverse depth-first: start, n1, n2, n3
-				chains = append(chains, []*callgraph.Node{start})
+				chains[0] = []*callgraph.Node{start}
 				n1 := start.In[0].Caller
-				chains = append(chains, []*callgraph.Node{start, n1})
+				chains[1] = []*callgraph.Node{start, n1}
 				n2 := n1.In[0].Caller
-				chains = append(chains, []*callgraph.Node{start, n1, n2})
+				chains[2] = []*callgraph.Node{start, n1, n2}
 				n3 := n2.In[0].Caller
-				chains = append(chains, []*callgraph.Node{start, n1, n2, n3})
+				chains[3] = []*callgraph.Node{start, n1, n2, n3}
 				return chains
 			},
 		},
@@ -76,13 +76,13 @@ func TestReverseDFS(t *testing.T) {
 			errAt:     -1,
 			wantErr:   false,
 			wantChainsFn: func(start *callgraph.Node) [][]*callgraph.Node {
-				var chains [][]*callgraph.Node
+				chains := make([][]*callgraph.Node, 3)
 				// stop traversal when reaching depth-2
-				chains = append(chains, []*callgraph.Node{start})
+				chains[0] = []*callgraph.Node{start}
 				n1 := start.In[0].Caller
-				chains = append(chains, []*callgraph.Node{start, n1})
+				chains[1] = []*callgraph.Node{start, n1}
 				n2 := n1.In[0].Caller
-				chains = append(chains, []*callgraph.Node{start, n1, n2})
+				chains[2] = []*callgraph.Node{start, n1, n2}
 				return chains
 			},
 		},
@@ -93,12 +93,12 @@ func TestReverseDFS(t *testing.T) {
 			errAt:     2,
 			wantErr:   true,
 			wantChainsFn: func(start *callgraph.Node) [][]*callgraph.Node {
-				var chains [][]*callgraph.Node
+				chains := make([][]*callgraph.Node, 2)
 				// expect start, then first caller popped (index 1)
-				chains = append(chains, []*callgraph.Node{start})
+				chains[0] = []*callgraph.Node{start}
 				// callers reversed: start.In[1] is popped first
 				caller := start.In[1].Caller
-				chains = append(chains, []*callgraph.Node{start, caller})
+				chains[1] = []*callgraph.Node{start, caller}
 				return chains
 			},
 		},
@@ -165,15 +165,15 @@ func TestReverseDFS(t *testing.T) {
 			errAt:     -1,
 			wantErr:   false,
 			wantChainsFn: func(start *callgraph.Node) [][]*callgraph.Node {
-				var chains [][]*callgraph.Node
-				chains = append(chains, []*callgraph.Node{start})
+				chains := make([][]*callgraph.Node, 4)
+				chains[0] = []*callgraph.Node{start}
 				// LIFO: second edge (c2) first
-				chains = append(chains, []*callgraph.Node{start, start.In[1].Caller})
+				chains[1] = []*callgraph.Node{start, start.In[1].Caller}
 				// then first edge (c1)
 				c1 := start.In[0].Caller
-				chains = append(chains, []*callgraph.Node{start, c1})
+				chains[2] = []*callgraph.Node{start, c1}
 				// and finally its child
-				chains = append(chains, []*callgraph.Node{start, c1, c1.In[0].Caller})
+				chains[3] = []*callgraph.Node{start, c1, c1.In[0].Caller}
 				return chains
 			},
 		},
@@ -195,11 +195,11 @@ func TestReverseDFS(t *testing.T) {
 			errAt:     -1,
 			wantErr:   false,
 			wantChainsFn: func(start *callgraph.Node) [][]*callgraph.Node {
-				var chains [][]*callgraph.Node
-				chains = append(chains, []*callgraph.Node{start})
+				chains := make([][]*callgraph.Node, 3)
+				chains[0] = []*callgraph.Node{start}
 				// still get both branches, but do NOT descend into c1a
-				chains = append(chains, []*callgraph.Node{start, start.In[1].Caller})
-				chains = append(chains, []*callgraph.Node{start, start.In[0].Caller})
+				chains[1] = []*callgraph.Node{start, start.In[1].Caller}
+				chains[2] = []*callgraph.Node{start, start.In[0].Caller}
 				return chains
 			},
 		},

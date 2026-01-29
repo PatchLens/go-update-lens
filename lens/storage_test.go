@@ -272,9 +272,9 @@ func TestKeyPrefixStorage(t *testing.T) {
 				assert.Equal(t, []byte(k), got)
 			}
 
-			var wantBase []string
-			for _, k := range tc.keys {
-				wantBase = append(wantBase, tc.prefix+";"+k)
+			wantBase := make([]string, len(tc.keys))
+			for i, k := range tc.keys {
+				wantBase[i] = tc.prefix + ";" + k
 			}
 			keys, err := base.ListKeys()
 			require.NoError(t, err)
