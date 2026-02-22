@@ -263,11 +263,56 @@ func makeFileFilter(dir string) func(fi fs.FileInfo) bool {
 	}
 }
 
+// parsedPkg holds the parsed Go files for a single package in a directory.
+type parsedPkg struct {
+	Files map[string]*ast.File
+}
+
+// parseDir replaces the deprecated parser.ParseDir. It reads the directory,
+// filters .go files using the optional filter, parses each with the given mode,
+// and returns packages grouped by name.
+func parseDir(fset *token.FileSet, dir string, filter func(fs.FileInfo) bool, mode parser.Mode) (map[string]*parsedPkg, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	pkgs := make(map[string]*parsedPkg)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		if filter != nil {
+			info, err := entry.Info()
+			if err != nil {
+				return nil, err
+			}
+			if !filter(info) {
+				continue
+			}
+		}
+		filename := filepath.Join(dir, entry.Name())
+		f, err := parser.ParseFile(fset, filename, nil, mode)
+		if err != nil {
+			return nil, err
+		}
+		name := f.Name.Name
+		pkg, ok := pkgs[name]
+		if !ok {
+			pkg = &parsedPkg{
+				Files: make(map[string]*ast.File),
+			}
+			pkgs[name] = pkg
+		}
+		pkg.Files[filename] = f
+	}
+	return pkgs, nil
+}
+
 // detectPackageName returns the single non-test package defined in dir.
 // It fails if the directory is empty, contains only *_test.go packages, or mixes two different packages.
 func detectPackageName(dir string) (string, error) {
 	// parse only the package clause
-	pkgs, err := parser.ParseDir(token.NewFileSet(), dir, makeFileFilter(dir), parser.PackageClauseOnly)
+	pkgs, err := parseDir(token.NewFileSet(), dir, makeFileFilter(dir), parser.PackageClauseOnly)
 	if err != nil {
 		return "", err
 	} else if len(pkgs) == 0 {
@@ -1127,7 +1172,7 @@ func buildTypesInfo(fset *token.FileSet, targetFile *ast.File) *types.Info {
 	}
 	dir := filepath.Dir(targetPos.Name())
 
-	pkgs, err := parser.ParseDir(fset, dir, makeFileFilter(dir), 0)
+	pkgs, err := parseDir(fset, dir, makeFileFilter(dir), 0)
 	if err != nil || len(pkgs) == 0 {
 		return nil
 	}
