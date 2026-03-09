@@ -6,7 +6,7 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/dgraph-io/ristretto/v2 v2.4.0
 	github.com/go-analyze/bulk v0.1.3
-	github.com/go-analyze/charts v0.5.25
+	github.com/go-analyze/charts v0.5.26
 	github.com/klauspost/compress v1.18.4
 	github.com/mtraver/base91 v1.0.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
