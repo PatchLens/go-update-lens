@@ -12,8 +12,8 @@ func TestZstdCompress(t *testing.T) {
 		name  string
 		input []byte
 	}{
-		{"nil_input", nil},
-		{"empty_input", nil},
+		{"nil_input", []byte{}},
+		{"empty_input", []byte{}},
 		{"ascii_text", []byte("The quick brown fox jumps over the lazy dog")},
 		{"binary_data", []byte{0x00, 0xFF, 0x10, 0x20, 0x7F}},
 	}
