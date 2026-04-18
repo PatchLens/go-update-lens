@@ -493,21 +493,22 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 			charts.ColorRed,
 		})
 
-	topLeftOpt := charts.NewHorizontalBarChartOptionWithData([][]float64{
+	topLeftOpt := charts.NewBarChartOptionWithData([][]float64{
 		{float64(reachableModuleFunctionCount)}, {float64(moduleChangeFuncCount - reachableModuleFunctionCount)},
 	})
+	topLeftOpt.Horizontal = true
 	topLeftOpt.StackSeries = charts.Ptr(true)
 	topLeftOpt.Theme = barGaugeThemeGreenYellowRed
 	topLeftOpt.Title.Text = "Module Change Impact"
-	topLeftOpt.XAxis.Unit = axisUnitForMax(moduleChangeFuncCount)
-	topLeftOpt.YAxis.Show = charts.Ptr(false)
+	topLeftOpt.ValueAxis[0].Unit = axisUnitForMax(moduleChangeFuncCount)
+	topLeftOpt.CategoryAxis.Show = charts.Ptr(false)
 	topLeftOpt.SeriesList[1].Label.Show = charts.Ptr(true)
 	topLeftOpt.SeriesList[1].Label.FontStyle.FontColor = firstValueSeriesRankColor(topLeftOpt.Theme, topLeftOpt.SeriesList)
 	topLeftOpt.SeriesList[1].Label.ValueFormatter = func(f float64) string {
 		total := float64(moduleChangeFuncCount)
 		return charts.FormatValueHumanize(100.0*(total-f)/total, 1, false) + "%"
 	}
-	if err := topLeft.HorizontalBarChart(topLeftOpt); err != nil {
+	if err := topLeft.BarChart(topLeftOpt); err != nil {
 		return resultBox, fmt.Errorf("error rendering chart: %w", err)
 	}
 	// subtext is added after due to a desire for custom formatting
@@ -518,37 +519,39 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 	})
 
 	couldBeValidated := reachableModuleFunctionCount - moduleChangesReachedInTesting - untrackedModuleFuncs
-	topRightOpt := charts.NewHorizontalBarChartOptionWithData([][]float64{
+	topRightOpt := charts.NewBarChartOptionWithData([][]float64{
 		{float64(moduleChangesReachedInTesting)}, // validated
 		{float64(untrackedModuleFuncs)},          // untracked due to old Go version
 		{float64(couldBeValidated)},              // could be validated, but weren't
 	})
+	topRightOpt.Horizontal = true
 	topRightOpt.StackSeries = charts.Ptr(true)
 	topRightOpt.Theme = barGaugeThemeGreenYellowRed
 	topRightOpt.Title.Text = "Changed Module Function Coverage"
-	topRightOpt.XAxis.Unit = axisUnitForMax(reachableModuleFunctionCount)
-	topRightOpt.YAxis.Show = charts.Ptr(false)
+	topRightOpt.ValueAxis[0].Unit = axisUnitForMax(reachableModuleFunctionCount)
+	topRightOpt.CategoryAxis.Show = charts.Ptr(false)
 	topRightOpt.SeriesList[2].Label.Show = charts.Ptr(true)
 	topRightOpt.SeriesList[2].Label.FontStyle.FontColor = firstValueSeriesRankColor(topRightOpt.Theme, topRightOpt.SeriesList)
 	topRightOpt.SeriesList[2].Label.ValueFormatter = func(f float64) string {
 		total := float64(reachableModuleFunctionCount)
 		return charts.FormatValueHumanize(100.0*(total-f)/total, 1, false) + "%"
 	}
-	if err := topRight.HorizontalBarChart(topRightOpt); err != nil {
+	if err := topRight.BarChart(topRightOpt); err != nil {
 		return resultBox, fmt.Errorf("error rendering chart: %w", err)
 	}
 
 	resultBox.Bottom += max(topLeft.Height(), topRight.Height())
 
-	down1LeftOpt := charts.NewHorizontalBarChartOptionWithData([][]float64{
+	down1LeftOpt := charts.NewBarChartOptionWithData([][]float64{
 		{float64(testFieldSameCount)}, {float64(testFieldDiffCount)},
 	})
+	down1LeftOpt.Horizontal = true
 	down1LeftOpt.StackSeries = charts.Ptr(true)
 	down1LeftOpt.Theme = barGaugeThemeGreenRed
 	down1LeftOpt.Title.Text = "Field Stability"
-	down1LeftOpt.XAxis.Show = charts.Ptr(false) // absolute number is fairly arbitrary
-	down1LeftOpt.YAxis.Show = charts.Ptr(false)
-	down1LeftOpt.BarHeight = 22
+	down1LeftOpt.ValueAxis[0].Show = charts.Ptr(false) // absolute number is fairly arbitrary
+	down1LeftOpt.CategoryAxis.Show = charts.Ptr(false)
+	down1LeftOpt.BarSize = 22
 	down1LeftOpt.SeriesList[1].Label.Show = charts.Ptr(true)
 	down1LeftOpt.SeriesList[1].Label.FontStyle.FontColor = firstValueSeriesRankColor(down1LeftOpt.Theme, down1LeftOpt.SeriesList)
 	down1LeftOpt.SeriesList[1].Label.ValueFormatter = func(diff float64) string {
@@ -559,19 +562,20 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 		}
 		return charts.FormatValueHumanize(percent, 1, false) + "%"
 	}
-	if err := down1Left.HorizontalBarChart(down1LeftOpt); err != nil {
+	if err := down1Left.BarChart(down1LeftOpt); err != nil {
 		return resultBox, fmt.Errorf("error rendering chart: %w", err)
 	}
 
-	down1RightOpt := charts.NewHorizontalBarChartOptionWithData([][]float64{
+	down1RightOpt := charts.NewBarChartOptionWithData([][]float64{
 		{float64(globalMutations.SquashedCount)}, {float64(globalMutations.MutationCount - globalMutations.SquashedCount)},
 	})
+	down1RightOpt.Horizontal = true
 	down1RightOpt.StackSeries = charts.Ptr(true)
 	down1RightOpt.Theme = barGaugeThemeGreenYellowRed
 	down1RightOpt.Title.Text = "Mutations Squashed"
-	down1RightOpt.XAxis.Show = charts.Ptr(false) // absolute number is fairly arbitrary
-	down1RightOpt.YAxis.Show = charts.Ptr(false)
-	down1RightOpt.BarHeight = down1LeftOpt.BarHeight
+	down1RightOpt.ValueAxis[0].Show = charts.Ptr(false) // absolute number is fairly arbitrary
+	down1RightOpt.CategoryAxis.Show = charts.Ptr(false)
+	down1RightOpt.BarSize = down1LeftOpt.BarSize
 	down1RightOpt.SeriesList[1].Label.Show = charts.Ptr(true)
 	down1RightOpt.SeriesList[1].Label.FontStyle.FontColor = firstValueSeriesRankColor(down1RightOpt.Theme, down1RightOpt.SeriesList)
 	down1RightOpt.SeriesList[1].Label.ValueFormatter = func(f float64) string {
@@ -582,32 +586,33 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 		}
 		return charts.FormatValueHumanize(percent, 1, false) + "%"
 	}
-	if err := down1Right.HorizontalBarChart(down1RightOpt); err != nil {
+	if err := down1Right.BarChart(down1RightOpt); err != nil {
 		return resultBox, fmt.Errorf("error rendering chart: %w", err)
 	}
 
 	// TODO - remove chart and painter if totalPreTime == 0
-	var down2Opt charts.HorizontalBarChartOption
+	var down2Opt charts.BarChartOption
 	if totalPostTime <= totalPreTime {
 		// improvement: post time first (smaller), then additional time that was saved
-		down2Opt = charts.NewHorizontalBarChartOptionWithData([][]float64{
+		down2Opt = charts.NewBarChartOptionWithData([][]float64{
 			{totalPostTime}, {totalPreTime - totalPostTime},
 		})
 		down2Opt.Theme = barGaugeThemeGreenYellowRed
 		down2Opt.SeriesList[1].Label.FontStyle.FontColor = charts.ColorBlack
 	} else {
 		// regression: pre time first (smaller), then additional time that was added
-		down2Opt = charts.NewHorizontalBarChartOptionWithData([][]float64{
+		down2Opt = charts.NewBarChartOptionWithData([][]float64{
 			{totalPreTime}, {totalPostTime - totalPreTime},
 		})
 		down2Opt.Theme = barGaugeThemeGreenRed
 		down2Opt.SeriesList[1].Label.FontStyle.FontColor = firstValueSeriesRankColor(down2Opt.Theme, down2Opt.SeriesList)
 	}
+	down2Opt.Horizontal = true
 	down2Opt.StackSeries = charts.Ptr(true)
 	down2Opt.Title.Text = "Performance Change (" + timeUnit + ")"
-	down2Opt.XAxis.Unit = axisUnitForMax(int(max(totalPreTime, totalPostTime)))
-	down2Opt.YAxis.Show = charts.Ptr(false)
-	down2Opt.BarHeight = down1LeftOpt.BarHeight
+	down2Opt.ValueAxis[0].Unit = axisUnitForMax(int(max(totalPreTime, totalPostTime)))
+	down2Opt.CategoryAxis.Show = charts.Ptr(false)
+	down2Opt.BarSize = down1LeftOpt.BarSize
 	down2Opt.SeriesList[1].Label.Show = charts.Ptr(true)
 	down2Opt.SeriesList[1].Label.ValueFormatter = func(f float64) string {
 		if totalPreTime == 0 {
@@ -620,7 +625,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 			return charts.FormatValueHumanize((1-ratio)*100.0, 1, false) + "% slower"
 		}
 	}
-	if err := down2.HorizontalBarChart(down2Opt); err != nil {
+	if err := down2.BarChart(down2Opt); err != nil {
 		return resultBox, fmt.Errorf("error rendering chart: %w", err)
 	}
 
@@ -793,7 +798,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 	return resultBox, nil
 }
 
-func firstValueSeriesRankColor(theme charts.ColorPalette, sl charts.HorizontalBarSeriesList) charts.Color {
+func firstValueSeriesRankColor(theme charts.ColorPalette, sl charts.BarSeriesList) charts.Color {
 	sum := sl.SumSeriesValues()
 	if sl[0].Values[0] < sum[0]/2 {
 		return redTextColor
