@@ -1,5 +1,7 @@
 # PatchLens
 
+[![Tests - Main Push](https://github.com/PatchLens/go-update-lens/actions/workflows/tests-main.yml/badge.svg)](https://github.com/PatchLens/go-update-lens/actions/workflows/tests-main.yml)
+
 A Go dependency update analysis tool that detects behavior changes when updating module dependencies. PatchLens analyzes the interaction between your Go project and dependency updates by locating intersecting call sites and running execution analysis before and after updates to detect behavior changes. Mutation testing provides a confidence score on regression detection.
 
 ## Features
