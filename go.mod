@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/dgraph-io/ristretto/v2 v2.4.0
-	github.com/go-analyze/bulk v0.1.3
+	github.com/go-analyze/bulk v0.1.4
 	github.com/go-analyze/charts v0.5.27
 	github.com/klauspost/compress v1.18.6
 	github.com/mtraver/base91 v1.0.0
