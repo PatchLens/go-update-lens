@@ -657,7 +657,6 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 				lines++
 
 				fieldChangeStr := callerIdent + "[" + strings.Join(slices.Sorted(maps.Keys(fieldMap)), "|") + "]"
-				fieldChangeStr += fieldChangeStr
 				if len(fieldChangeStr) > 66 {
 					fieldChangeStr = fieldChangeStr[:64] + ".."
 				}
