@@ -130,6 +130,11 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 		}
 	}
 
+	if len(mutationFiles) == 0 {
+		log.Printf("No mutation targets after filtering changed lines, skipping mutation testing")
+		return MutationResult{}, nil
+	}
+
 	patterns, err := ProjectPackagePatterns(projectDir)
 	if err != nil {
 		return MutationResult{}, err
