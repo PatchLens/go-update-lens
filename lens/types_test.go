@@ -566,6 +566,27 @@ func TestTestResultMsgpackEncoding(t *testing.T) {
 		assert.NotEmpty(t, enc.STDict)
 	})
 
+	t.Run("hash_collision", func(t *testing.T) {
+		t.Parallel()
+
+		// {"ab":"c"} and {"a":"bc"} collided under the old unframed hash, dedup corrupted one
+		tr := &TestResult{
+			TestFunction: MinimumTestFunction{FunctionIdent: "collide", FunctionName: "TestCollide"},
+			CallerResults: map[string][]CallFrame{
+				"c1": {{FieldValues: FieldValues{"ab": &FieldValue{Value: "c"}}}},
+				"c2": {{FieldValues: FieldValues{"a": &FieldValue{Value: "bc"}}}},
+			},
+		}
+
+		data, err := tr.MarshalMsgpack()
+		require.NoError(t, err)
+		var decoded TestResult
+		require.NoError(t, decoded.UnmarshalMsgpack(data))
+
+		assert.Equal(t, map[string]string{"ab": "c"}, decoded.CallerResults["c1"][0].FieldValues.FlattenFieldValues())
+		assert.Equal(t, map[string]string{"a": "bc"}, decoded.CallerResults["c2"][0].FieldValues.FlattenFieldValues())
+	})
+
 	t.Run("large_data_structures", func(t *testing.T) {
 		t.Parallel()
 
@@ -814,6 +835,16 @@ func TestFieldValues(t *testing.T) {
 		}
 		id3 := fv3.ID()
 		assert.NotEqual(t, id1, id3)
+
+		// key/value boundary must not shift: {"ab":"c"} vs {"a":"bc"}
+		fvAB := FieldValues{"ab": &FieldValue{Value: "c"}}
+		fvA := FieldValues{"a": &FieldValue{Value: "bc"}}
+		assert.NotEqual(t, fvAB.ID(), fvA.ID())
+
+		// leaf-vs-node boundary must not shift
+		fvLeaf := FieldValues{"k": &FieldValue{Value: "x"}}
+		fvNode := FieldValues{"k": &FieldValue{Children: FieldValues{"x": &FieldValue{Value: ""}}}}
+		assert.NotEqual(t, fvLeaf.ID(), fvNode.ID())
 	})
 }
 

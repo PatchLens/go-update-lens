@@ -73,7 +73,7 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 	}
 
 	// start ast monitor servers once to be reused across tests
-	serverCount := min(runtime.NumCPU()/2, len(testFunctions), 64)
+	serverCount := min(max(1, runtime.NumCPU()/2), len(testFunctions), 64)
 	srvChan := make(chan *astServer, serverCount)
 	srvs := make([]*astServer, 0, serverCount)
 	defer func() { // set defer here so errors while starting will stop constructed servers
@@ -119,6 +119,18 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 		sumBkp  string
 	}
 	backups := make([]modBackupInfo, 0, len(goModPaths))
+	// restore originals (and remove .bkp) on every return path, including early errors
+	defer func() {
+		for _, b := range backups {
+			if err := os.Rename(b.modBkp, b.modPath); err != nil {
+				log.Printf("%sFailed to restore %s: %v", ErrorLogPrefix, b.modPath, err)
+			} else if b.sumPath != "" {
+				if err := os.Rename(b.sumBkp, b.sumPath); err != nil {
+					log.Printf("%sFailed to restore %s: %v", ErrorLogPrefix, b.sumPath, err)
+				}
+			}
+		}
+	}()
 	for _, gm := range goModPaths {
 		sum := filepath.Join(filepath.Dir(gm), "go.sum")
 		info := modBackupInfo{modPath: gm, modBkp: gm + ".bkp"}
@@ -164,19 +176,6 @@ func RunModuleUpdateAnalysis(gopath, gomodcache, projectDir string, portStart in
 			callingFunctions, testFunctions, nil, postUpdateExtensionConfig)
 	if err != nil {
 		return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil, err
-	}
-
-	// RESTORE original go.mod & go.sum for each module
-	for _, b := range backups {
-		if err := os.Rename(b.modBkp, b.modPath); err != nil {
-			return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
-				fmt.Errorf("failed to restore %s: %w", b.modPath, err)
-		} else if b.sumPath != "" {
-			if err := os.Rename(b.sumBkp, b.sumPath); err != nil {
-				return projectFieldChecks1, moduleChangesReached, skippedModuleFuncs, preStorage, nil,
-					fmt.Errorf("failed to restore %s: %w", b.modPath, err)
-			}
-		}
 	}
 
 	return max(projectFieldChecks1, projectFieldChecks2), moduleChangesReached, skippedModuleFuncs, preStorage, postStorage, nil

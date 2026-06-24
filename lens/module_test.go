@@ -191,6 +191,14 @@ func TestComputeChangeLineBitmap(t *testing.T) {
 			radius:       1,
 			expectBitmap: []bool{false, true, false, false},
 		},
+		{
+			// additions-only: no changed logic, so nothing to mutate (drives mutation skip)
+			name:         "additions only all false",
+			oldDef:       "func foo() {\n\tbar()\n}",
+			newDef:       "func foo() {\n\tbar()\n\tbaz()\n\tqux()\n}",
+			newFunc:      false,
+			expectBitmap: []bool{false, false, false},
+		},
 	}
 
 	for _, tc := range testCases {

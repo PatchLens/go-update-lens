@@ -1553,19 +1553,9 @@ func zeroValueForType(buf *bytes.Buffer, typ ast.Expr) (ast.Expr, error) {
 			// But if it does, return nil as a safe default
 			return ast.NewIdent("nil"), nil
 		default:
-			// For named types, we face a dilemma:
-			// - We can't use *new(T) as it might conflict with package names
-			// - We can't use (T){} as Go doesn't allow parenthesized types in composite literals
-			// - We can't use T(0) as it only works for numeric types
-			//
-			// Best compromise: Use T{} and accept that it might fail for types
-			// that conflict with package names. This is relatively rare and the
-			// compilation error will be clear when it happens.
-			clonedType, err := cloneExprNoPos(buf, t)
-			if err != nil {
-				return nil, err
-			}
-			return &ast.CompositeLit{Type: clonedType}, nil
+			// named type T - *new(T) is valid for any type (interface/struct/basic),
+			// unlike T{} which fails for interface/named-basic results
+			return newZeroValueExpr(buf, t)
 		}
 
 	// Pointer, map, channel, function, and interface types all have nil zero value
@@ -1599,43 +1589,33 @@ func zeroValueForType(buf *bytes.Buffer, typ ast.Expr) (ast.Expr, error) {
 		return &ast.CompositeLit{Type: clonedType}, nil
 
 	case *ast.SelectorExpr:
-		// pkg.Type - use composite literal
-		clonedType, err := cloneExprNoPos(buf, t)
-		if err != nil {
-			return nil, err
-		}
-		return &ast.CompositeLit{Type: clonedType}, nil
+		// pkg.Type - *new(pkg.Type) is valid for any underlying kind
+		return newZeroValueExpr(buf, t)
 
 	case *ast.IndexExpr:
-		// Generic type with single param: T[U] - use *new(T[U])
-		clonedType, err := cloneExprNoPos(buf, t)
-		if err != nil {
-			return nil, err
-		}
-		return &ast.StarExpr{X: &ast.CallExpr{
-			Fun:  ast.NewIdent("new"),
-			Args: []ast.Expr{clonedType},
-		}}, nil
+		// generic type with single param: T[U]
+		return newZeroValueExpr(buf, t)
 
 	case *ast.IndexListExpr:
-		// Generic type with multiple params: T[K, V] - use *new(T[K,V])
-		clonedType, err := cloneExprNoPos(buf, t)
-		if err != nil {
-			return nil, err
-		}
-		return &ast.StarExpr{X: &ast.CallExpr{
-			Fun:  ast.NewIdent("new"),
-			Args: []ast.Expr{clonedType},
-		}}, nil
+		// generic type with multiple params: T[K, V]
+		return newZeroValueExpr(buf, t)
 
 	default:
-		// Fallback: use composite literal for any type
-		clonedType, err := cloneExprNoPos(buf, typ)
-		if err != nil {
-			return nil, err
-		}
-		return &ast.CompositeLit{Type: clonedType}, nil
+		// fallback: *new(T) is valid for any type
+		return newZeroValueExpr(buf, typ)
 	}
+}
+
+// newZeroValueExpr builds the *new(T) zero-value expression, valid for any type.
+func newZeroValueExpr(buf *bytes.Buffer, typ ast.Expr) (ast.Expr, error) {
+	clonedType, err := cloneExprNoPos(buf, typ)
+	if err != nil {
+		return nil, err
+	}
+	return &ast.StarExpr{X: &ast.CallExpr{
+		Fun:  ast.NewIdent("new"),
+		Args: []ast.Expr{clonedType},
+	}}, nil
 }
 
 // cloneExprNoPos is a helper to clone an AST, dropping positions.

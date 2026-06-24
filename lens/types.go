@@ -3,6 +3,7 @@ package lens
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"slices"
 	"strconv"
@@ -555,7 +556,14 @@ func (fv *FieldValue) ID() string {
 	if fv == nil {
 		return ""
 	}
-	return stringKey(fv.Value + "|" + fv.Children.ID())
+	// length-prefix Value so its bytes can't shift into the children hash
+	var lenBuf [8]byte
+	binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(fv.Value)))
+	buf := make([]byte, 0, len(lenBuf)+len(fv.Value)+sha1.Size)
+	buf = append(buf, lenBuf[:]...)
+	buf = append(buf, fv.Value...)
+	buf = append(buf, fv.Children.ID()...)
+	return bytesKey(buf)
 }
 
 // StackFrame represents one frame in a call stack
@@ -617,16 +625,24 @@ func (fv FieldValues) ID() string {
 		return "empty"
 	}
 	hash := sha1.New()
+	var lenBuf [8]byte
+	writeFramed := func(b []byte) { // length-prefix so boundaries can't shift
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(b)))
+		hash.Write(lenBuf[:])
+		hash.Write(b)
+	}
 	var walk func(cur FieldValues)
 	walk = func(cur FieldValues) {
 		sortedKeys := bulk.MapKeysSlice(cur)
 		slices.Sort(sortedKeys)
 		for _, key := range sortedKeys {
-			hash.Write([]byte(key))
+			writeFramed([]byte(key))
 			fv := cur[key]
 			if len(fv.Children) == 0 {
-				hash.Write([]byte(fv.Value))
+				hash.Write([]byte{0}) // leaf tag
+				writeFramed([]byte(fv.Value))
 			} else {
+				hash.Write([]byte{1}) // node tag
 				walk(fv.Children)
 			}
 		}

@@ -172,7 +172,7 @@ func analyzeModuleChangesInternal(includeTransitive bool, mc *ModuleChange, gomo
 		pkgs []*packages.Package
 		err  error
 	}
-	resultCh := make(chan loadModuleResult)
+	resultCh := make(chan loadModuleResult, 1) // buffered so the sender never blocks on early return
 	go func() {
 		oldDir, oldPkgs, err := loadModulePackageFromCache(gomodcache, mc.Name, mc.PriorVersion)
 		resultCh <- loadModuleResult{oldDir, oldPkgs, err}

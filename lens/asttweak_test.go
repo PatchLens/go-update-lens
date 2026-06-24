@@ -3249,8 +3249,8 @@ func TestZeroValueForType(t *testing.T) {
 		{"generic_single", "Optional[int]", "*new(Optional[int])"},
 		{"generic_multi", "Map[string, int]", "*new(Map[string, int])"},
 		{"func_type", "func(int) string", "nil"},
-		{"named_type", "MyType", "MyType{}"},
-		{"selector_type", "pkg.Type", "pkg.Type{}"},
+		{"named_type", "MyType", "*new(MyType)"},
+		{"selector_type", "pkg.Type", "*new(pkg.Type)"},
 		{"pointer_to_struct", "*struct{}", "nil"},
 		{"slice_of_pointers", "[]*int", "nil"},
 		{"map_with_pointer_value", "map[string]*int", "nil"},
@@ -5032,4 +5032,45 @@ func CreateAndProcess() int {
 		output, err := cmd.CombinedOutput()
 		require.NoError(t, err, "Build failed with: %s\n\nModified source:\n%s", string(output), string(modifiedSrc))
 	})
+}
+
+// TestZeroValueForTypeCompiles verifies the named/selector cases emit a form that actually
+// compiles - the prior T{} failed to type-check for interface and named-basic results.
+func TestZeroValueForTypeCompiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	t.Parallel()
+
+	render := func(typeStr string) string {
+		typ, err := parser.ParseExpr(typeStr)
+		require.NoError(t, err)
+		zero, err := zeroValueForType(&bytes.Buffer{}, typ)
+		require.NoError(t, err)
+		var buf bytes.Buffer
+		require.NoError(t, format.Node(&buf, token.NewFileSet(), zero))
+		return buf.String()
+	}
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(testGoMod), 0644))
+
+	// named interface, named basic, pkg.Type - T{} fails to compile for these
+	src := fmt.Sprintf(`package testmod
+
+import "bytes"
+
+type MyIface interface{ M() }
+type MyInt int
+
+var _ MyIface = %s
+var _ MyInt = %s
+var _ bytes.Buffer = %s
+`, render("MyIface"), render("MyInt"), render("bytes.Buffer"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0644))
+
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "Build failed with: %s\n\nSource:\n%s", string(output), src)
 }
