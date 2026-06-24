@@ -1033,7 +1033,7 @@ func (e *AnalysisEngine) setupTempEnvironment() (func(), error) {
 	if err := CopyDir(ctx, e.Config.Gopath, newGOPATH, copyProgressHandler); err != nil {
 		return nil, fmt.Errorf("unable to copy GOPATH: %w", err)
 	}
-	if !strings.HasPrefix(e.Config.Gomodcache, e.Config.Gopath) {
+	if within, err := fileWithinDir(e.Config.Gomodcache, e.Config.Gopath); err != nil || !within {
 		newModCache := filepath.Join(tempRoot, "gomodcache")
 		if err := CopyDir(ctx, e.Config.Gomodcache, newModCache, copyProgressHandler); err != nil {
 			return nil, fmt.Errorf("unable to copy GOMODCACHE: %w", err)
