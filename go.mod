@@ -10,7 +10,7 @@ require (
 	github.com/klauspost/compress v1.19.2
 	github.com/mtraver/base91 v1.0.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/mod v0.38.0
 	golang.org/x/sync v0.22.0
@@ -19,7 +19,6 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
