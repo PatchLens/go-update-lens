@@ -1,6 +1,6 @@
 module github.com/PatchLens/go-update-lens
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.6
@@ -13,7 +13,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/mod v0.40.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.24.0
 	golang.org/x/tools v0.49.0
 )
 
