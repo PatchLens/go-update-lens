@@ -7,7 +7,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/go-analyze/bulk v0.1.6
 	github.com/go-analyze/charts v0.6.4
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/mtraver/base91 v1.0.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/stretchr/testify v1.12.1
