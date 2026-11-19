@@ -14,7 +14,6 @@ linters:
     - fatcontext
     - gocheckcompilerdirectives
     - gochecksumtype
-    - goconst
     - godoclint
     - gosmopolitan
     - grouper
