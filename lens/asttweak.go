@@ -143,8 +143,7 @@ func (m *ASTModifier) loadParsedFileNode(filepath string) (*token.FileSet, *ast.
 		m.commitActions = make(map[string]func(*bytes.Buffer) error)
 	}
 	m.commitActions[filepath] = func(buf *bytes.Buffer) error {
-		buf.Reset()
-		if err := format.Node(buf, fset, fileNode); err != nil {
+		if err := formatInstrumentedFile(buf, fset, fileNode); err != nil {
 			return fmt.Errorf("ast format failure %s: %w", filepath, err)
 		} else if err := m.backupOrigFile(filepath); err != nil {
 			return err
@@ -154,6 +153,58 @@ func (m *ASTModifier) loadParsedFileNode(filepath string) (*token.FileSet, *ast.
 		return nil
 	}
 	return fset, fileNode, nil
+}
+
+// formatInstrumentedFile renders file into buf and verifies the output parses. Injected nodes
+// carry no source positions, so go/printer can flush nearby comments into them and emit
+// invalid syntax. When that happens, comments below the package clause are stripped and the
+// file reprinted; build constraint comments above the package clause are preserved.
+func formatInstrumentedFile(buf *bytes.Buffer, fset *token.FileSet, file *ast.File) error {
+	buf.Reset()
+	var formatErr error
+	if err := format.Node(buf, fset, file); err != nil {
+		formatErr = err
+	} else if _, err := parser.ParseFile(token.NewFileSet(), "", buf.Bytes(), 0); err != nil {
+		formatErr = err
+	}
+	if formatErr == nil {
+		return nil
+	}
+
+	stripCommentsBelowPackage(file)
+	buf.Reset()
+	if err := format.Node(buf, fset, file); err != nil {
+		return formatErr // surface the original failure rather than the fallback detail
+	} else if _, err := parser.ParseFile(token.NewFileSet(), "", buf.Bytes(), 0); err != nil {
+		return fmt.Errorf("%w (comment stripped output still invalid: %w)", formatErr, err)
+	}
+	return nil
+}
+
+// stripCommentsBelowPackage drops all comments and doc attachments below the package clause.
+func stripCommentsBelowPackage(file *ast.File) {
+	pkgEnd := file.Name.End()
+	file.Comments = bulk.SliceFilter(func(cg *ast.CommentGroup) bool {
+		return cg.Pos() < pkgEnd
+	}, file.Comments)
+	file.Doc = nil
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.FuncDecl:
+			d.Doc = nil
+		case *ast.GenDecl:
+			d.Doc = nil
+		case *ast.Field:
+			d.Doc, d.Comment = nil, nil
+		case *ast.ImportSpec:
+			d.Doc, d.Comment = nil, nil
+		case *ast.ValueSpec:
+			d.Doc, d.Comment = nil, nil
+		case *ast.TypeSpec:
+			d.Doc, d.Comment = nil, nil
+		}
+		return true
+	})
 }
 
 // CommitFile writes pending edits for a single file.

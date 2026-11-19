@@ -5074,3 +5074,46 @@ var _ bytes.Buffer = %s
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "Build failed with: %s\n\nSource:\n%s", string(output), src)
 }
+
+// Regression: inline comments after an injection point can be flushed by go/printer into the
+// synthetic statements, producing invalid syntax (seen with charts painter.go smoothFillChartArea).
+func TestCommitFileInlineCommentFallback(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test.go")
+	src := `//go:build linux
+
+package testpkg
+
+func Foo(points []int) int {
+	count := len(points)
+	if count < 4 /* need at least 4 points */ {
+		return 0
+	}
+	tail := points[count-3:] // [corner1, corner2, firstTopAgain]
+	return len(tail)
+}
+`
+	require.NoError(t, os.WriteFile(filePath, []byte(src), 0o644))
+
+	mod := &ASTModifier{}
+	fn := &Function{
+		FilePath:      filePath,
+		PackageName:   "testpkg",
+		FunctionIdent: "testpkg:Foo",
+		FunctionName:  "Foo",
+	}
+	_, err := mod.InjectFuncPointEntry(fn)
+	require.NoError(t, err)
+	_, err = mod.InjectFuncPointPanic(fn)
+	require.NoError(t, err)
+	require.NoError(t, mod.CommitFile(filePath))
+
+	data, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	_, err = parser.ParseFile(token.NewFileSet(), "", data, 0)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "//go:build linux")
+	assert.Contains(t, string(data), "sendLensPointMessage(")
+}
