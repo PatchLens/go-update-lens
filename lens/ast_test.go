@@ -561,6 +561,86 @@ func main() {
 			},
 		},
 		{
+			name:   "point_return_state_select",
+			fnName: "TargetState",
+			src: `package main
+func TargetState(a int) int {
+	ch := make(chan int, 1)
+	select {
+	case v := <-ch:
+		a = v
+	default:
+		return a
+	}
+	return a
+}
+func main() { _ = TargetState(41) }`,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
+			expectedStatePoints: 1,
+			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
+				p := points[0]
+				// the return inside the default clause must not capture v from the sibling clause
+				require.Len(t, p.Fields, 2)
+				assert.Equal(t, "a", p.Fields[0].Name)
+				assert.InDelta(t, 41, p.Fields[0].Value, 0)
+				assert.Equal(t, "ch", p.Fields[1].Name)
+			},
+		},
+		{
+			name:   "point_return_state_label_goto",
+			fnName: "TargetState",
+			src: `package main
+func TargetState(a int) int {
+	if a > 10 {
+		return 1
+	} else if a > 5 {
+		goto Done
+	}
+Done:
+	return a
+}
+func main() { _ = TargetState(7) }`,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
+			expectedStatePoints: 1,
+			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
+				p := points[0]
+				require.Len(t, p.Fields, 1)
+				assert.Equal(t, "a", p.Fields[0].Name)
+				assert.InDelta(t, 7, p.Fields[0].Value, 0)
+			},
+		},
+		{
+			name:   "point_return_state_trailing_else",
+			fnName: "TargetState",
+			src: `package main
+func TargetState(a int) int {
+	if a > 10 {
+		return 1
+	} else if a > 5 {
+		panic("too big")
+	} else {
+		return -a
+	}
+}
+func main() { _ = TargetState(3) }`,
+			inject:              (*ASTModifier).InjectFuncPointReturnStates,
+			expectedStatePoints: 1,
+			statePointValidator: func(t *testing.T, points []LensMonitorMessagePointState) {
+				t.Helper()
+
+				p := points[0]
+				require.Len(t, p.Fields, 2)
+				assert.Equal(t, "a", p.Fields[0].Name)
+				assert.InDelta(t, 3, p.Fields[0].Value, 0)
+				assert.Equal(t, "ret0", p.Fields[1].Name)
+				assert.InDelta(t, -3, p.Fields[1].Value, 0)
+			},
+		},
+		{
 			name:   "generic_func",
 			fnName: "Generic",
 			src: `package main

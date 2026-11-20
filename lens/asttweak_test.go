@@ -449,6 +449,32 @@ func Foo(cond bool) int {
 			want: []string{"cond"},
 		},
 		{
+			name: "select comm clause scoped",
+			src: `package foo
+func Foo(ch chan int) int {
+    select {
+    case v := <-ch:
+        _ = v
+    default:
+    }
+    return 0
+}`,
+			want: []string{"ch"},
+		},
+		{
+			name: "return in later comm clause",
+			src: `package foo
+func Foo(ch, other chan int) int {
+    select {
+    case v := <-other:
+        _ = v
+    default:
+        return 0
+    }
+}`,
+			want: []string{"ch", "other"},
+		},
+		{
 			name: "reuse name",
 			src: `package foo
 func Foo(a int) int {
@@ -1286,6 +1312,238 @@ func GetBlank() (_ int) {
 	}
 }
 
+func TestInjectFuncPointReturnStatesWalker(t *testing.T) {
+	t.Parallel()
+
+	const testPkgName = "testpkg"
+	const funcName = "TargetState"
+
+	testCases := []struct {
+		name            string
+		src             string
+		expectedPoints  int // explicit returns instrumented with a state point
+		expectedReturns int // ReturnStmt count after rewrite, a phantom implicit return adds one
+	}{
+		{
+			name: "select_comm_clause_returns",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	ch := make(chan int, 1)
+	if a > 0 {
+		select {
+		case ch <- a:
+			return 1
+		default:
+			return 2
+		}
+	}
+	return 3
+}`,
+			expectedPoints:  3,
+			expectedReturns: 3,
+		},
+		{
+			name: "select_only_returns",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	ch := make(chan int, 1)
+	if a > 0 {
+		select {
+		case ch <- a:
+			return 1
+		default:
+			return 2
+		}
+	}
+	panic("unreachable")
+}`,
+			expectedPoints:  2,
+			expectedReturns: 2, // no phantom implicit return appended after the panic
+		},
+		{
+			name: "label_on_return",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	if a > 0 {
+		goto Done
+	}
+	return -1
+Done:
+	return a
+}`,
+			expectedPoints:  2,
+			expectedReturns: 2,
+		},
+		{
+			name: "label_wrapping_if",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	if a < 0 {
+		goto Check
+	}
+	return -1
+Check:
+	if a > 0 {
+		return 1
+	}
+	return 2
+}`,
+			expectedPoints:  3,
+			expectedReturns: 3,
+		},
+		{
+			name: "nested_labels_on_return",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	if a == 0 {
+		goto Inner
+	} else if a == 1 {
+		goto Outer
+	}
+	return -1
+Outer:
+Inner:
+	return a
+}`,
+			expectedPoints:  2,
+			expectedReturns: 2,
+		},
+		{
+			name: "label_on_loop",
+			src: `package testpkg
+
+func TargetState(a int) int {
+Outer:
+	for i := 0; i < 3; i++ {
+		if i == a {
+			return i
+		} else if i == 2 {
+			break Outer
+		}
+	}
+	return -1
+}`,
+			expectedPoints:  2,
+			expectedReturns: 2,
+		},
+		{
+			name: "else_if_trailing_else",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	if a > 10 {
+		return 1
+	} else if a > 5 {
+		return 2
+	} else {
+		return 3
+	}
+}`,
+			expectedPoints:  3,
+			expectedReturns: 3,
+		},
+		{
+			name: "trailing_else_only_return",
+			src: `package testpkg
+
+func TargetState(a int) int {
+	if a > 5 {
+		panic("big")
+	} else if a > 1 {
+		panic("bigger")
+	} else {
+		return -1
+	}
+}`,
+			expectedPoints:  1,
+			expectedReturns: 1, // no phantom implicit return appended after the chain
+		},
+		{
+			name: "compound_shapes_regression",
+			src: `package testpkg
+
+func TargetState(a int) []int {
+	var out []int
+	for i := 0; i < 3; i++ {
+		if i == a {
+			return nil
+		}
+		out = append(out, i)
+	}
+	switch v := interface{}(a).(type) {
+	case int:
+		return append(out, v)
+	default:
+		return out
+	}
+}`,
+			expectedPoints:  3,
+			expectedReturns: 3,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			filePath := filepath.Join(dir, "test.go")
+			require.NoError(t, os.WriteFile(filePath, []byte(tc.src), 0o644))
+			modifier := &ASTModifier{}
+			fn := Function{
+				FunctionIdent: testPkgName + ":" + funcName,
+				FunctionName:  funcName,
+				PackageName:   testPkgName,
+				FilePath:      filePath,
+			}
+
+			pointIDs, err := modifier.InjectFuncPointReturnStates(&fn)
+			require.NoError(t, err)
+			require.Len(t, pointIDs, tc.expectedPoints)
+
+			// second injection is a no-op due to the modification marker
+			repeatIDs, err := modifier.InjectFuncPointReturnStates(&fn)
+			require.NoError(t, err)
+			assert.Empty(t, repeatIDs)
+
+			require.NoError(t, modifier.CommitFile(filePath))
+
+			fset := token.NewFileSet()
+			modFile, err := parser.ParseFile(fset, filePath, nil, 0)
+			require.NoError(t, err)
+
+			var funcDecl *ast.FuncDecl
+			for _, decl := range modFile.Decls {
+				if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == funcName {
+					funcDecl = fd
+					break
+				}
+			}
+			require.NotNil(t, funcDecl)
+
+			// every instrumented return contributes one send call, and the rewrite must
+			// neither drop nor synthesize return statements
+			var sendCount, returnCount int
+			ast.Inspect(funcDecl, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					if ident, ok := x.Fun.(*ast.Ident); ok && ident.Name == sendLensPointStateMessageFunc {
+						sendCount++
+					}
+				case *ast.ReturnStmt:
+					returnCount++
+				}
+				return true
+			})
+			assert.Equal(t, tc.expectedPoints, sendCount)
+			assert.Equal(t, tc.expectedReturns, returnCount)
+		})
+	}
+}
+
 func TestInjectFuncPointBeforeCall(t *testing.T) {
 	t.Parallel()
 
@@ -1787,6 +2045,32 @@ func ProcessData() {
 			},
 			expectedPoints: 1,
 			expectedCalls:  map[string]int{"fmt.Println": 2},
+		},
+		{
+			name: "call_in_trailing_else",
+			src: `package testpkg
+import "fmt"
+
+func ProcessData(a int) {
+	if a > 10 {
+		fmt.Println("big")
+	} else if a > 5 {
+		panic("too big")
+	} else {
+		fmt.Printf("small: %d\n", a)
+	}
+}`,
+			funcName: "ProcessData",
+			predicate: func(call *ast.CallExpr) (any, bool) {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok && x.Name == fmtPackage {
+						return struct{}{}, true
+					}
+				}
+				return struct{}{}, false
+			},
+			expectedPoints: 2,
+			expectedCalls:  map[string]int{"fmt.Println": 1, "fmt.Printf": 1},
 		},
 	}
 

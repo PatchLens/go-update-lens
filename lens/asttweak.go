@@ -601,80 +601,80 @@ func (m *ASTModifier) InjectFuncPointReturnStates(fn *Function) ([]uint32, error
 	// Walk the AST, rewriting every *ast.ReturnStmt in-place.
 	var pointIDs []uint32
 	var foundExplicitReturn bool
-	// helper function that recursively rewrites a *ast.BlockStmt in-place
 	var buf bytes.Buffer
-	var rewriteBlock func(*ast.BlockStmt) error
-	rewriteBlock = func(blk *ast.BlockStmt) error {
-		for i, st := range blk.List {
-			switch s := st.(type) {
-			case *ast.ReturnStmt:
-				foundExplicitReturn = true
-				pointID, err := m.nextPointId()
-				if err != nil {
-					return err
-				}
-				pointIDs = append(pointIDs, pointID)
 
-				decls := visibleDeclsBefore(funcDecl, s.Pos())
-				newNode, err := buildReturnInstrumentation(&buf, s, pointID, fn, decls, funcResultTypes, info, funcResultNames)
-				if err != nil {
-					return err
-				}
-				blk.List[i] = newNode // replace old return with block
-			case *ast.BlockStmt:
-				if err := rewriteBlock(s); err != nil {
-					return err
-				}
-			case *ast.IfStmt:
-				if err := rewriteBlock(s.Body); err != nil {
-					return err
-				}
-				if s.Else != nil {
-					switch e := s.Else.(type) {
-					case *ast.BlockStmt:
-						if err := rewriteBlock(e); err != nil {
-							return err
-						}
-					case *ast.IfStmt:
-						if err := rewriteBlock(e.Body); err != nil {
-							return err
-						}
-					}
-				}
-			case *ast.ForStmt:
-				if err := rewriteBlock(s.Body); err != nil {
-					return err
-				}
-			case *ast.RangeStmt:
-				if err := rewriteBlock(s.Body); err != nil {
-					return err
-				}
-			case *ast.SwitchStmt:
-				for _, stmt := range s.Body.List {
-					if cc, ok := stmt.(*ast.CaseClause); ok {
-						blk := &ast.BlockStmt{List: cc.Body}
-						if err := rewriteBlock(blk); err != nil {
-							return err
-						}
-						cc.Body = blk.List
-					}
-				}
-			case *ast.TypeSwitchStmt:
-				for _, stmt := range s.Body.List {
-					if cc, ok := stmt.(*ast.CaseClause); ok {
-						blk := &ast.BlockStmt{List: cc.Body}
-						if err := rewriteBlock(blk); err != nil {
-							return err
-						}
-						cc.Body = blk.List
-					}
-				}
+	// rewriteList rewrites each statement of a list in-place. Function literal bodies are not
+	// visited since closure results differ from the enclosing function's return state.
+	var rewriteList func([]ast.Stmt) error
+	// rewriteStmt dispatches one statement and returns the node to store at its position, as
+	// only ReturnStmt is replaced. Labels, else branches, and case/comm clauses dispatch their
+	// inner statements back through this switch so nested compound forms stay reachable.
+	var rewriteStmt func(ast.Stmt) (ast.Stmt, error)
+	rewriteList = func(list []ast.Stmt) error {
+		for i, st := range list {
+			newSt, err := rewriteStmt(st)
+			if err != nil {
+				return err
 			}
+			list[i] = newSt
 		}
 		return nil
 	}
+	rewriteStmt = func(st ast.Stmt) (ast.Stmt, error) {
+		switch s := st.(type) {
+		case *ast.ReturnStmt:
+			foundExplicitReturn = true
+			pointID, err := m.nextPointId()
+			if err != nil {
+				return nil, err
+			}
+			pointIDs = append(pointIDs, pointID)
 
-	if err := rewriteBlock(funcDecl.Body); err != nil {
+			decls := visibleDeclsBefore(funcDecl, s.Pos())
+			newNode, err := buildReturnInstrumentation(&buf, s, pointID, fn, decls,
+				funcResultTypes, info, funcResultNames)
+			if err != nil {
+				return nil, err
+			}
+			return newNode, nil // replace old return with block
+		case *ast.BlockStmt:
+			return st, rewriteList(s.List)
+		case *ast.IfStmt:
+			if err := rewriteList(s.Body.List); err != nil {
+				return nil, err
+			}
+			// The parser only allows a block or another if here, so dispatching the else branch
+			// back through this switch also descends else-if chains to reach the trailing else.
+			if s.Else != nil {
+				if _, err := rewriteStmt(s.Else); err != nil {
+					return nil, err
+				}
+			}
+		case *ast.ForStmt:
+			return st, rewriteList(s.Body.List)
+		case *ast.RangeStmt:
+			return st, rewriteList(s.Body.List)
+		case *ast.SwitchStmt:
+			return st, rewriteList(s.Body.List) // elements are CaseClauses
+		case *ast.TypeSwitchStmt:
+			return st, rewriteList(s.Body.List)
+		case *ast.SelectStmt:
+			return st, rewriteList(s.Body.List) // elements are CommClauses
+		case *ast.CaseClause:
+			return st, rewriteList(s.Body)
+		case *ast.CommClause:
+			return st, rewriteList(s.Body)
+		case *ast.LabeledStmt:
+			newInner, err := rewriteStmt(s.Stmt)
+			if err != nil {
+				return nil, err
+			}
+			s.Stmt = newInner
+		}
+		return st, nil
+	}
+
+	if err := rewriteList(funcDecl.Body.List); err != nil {
 		return nil, fmt.Errorf("ast rewrite failure %s: %w", fn.FilePath, err)
 	} else if !foundExplicitReturn {
 		pointID, err := m.nextPointId()
@@ -828,6 +828,25 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 			return true
 		})
 		return firstErr
+	}
+
+	// rewriteElseChain descends into an else branch, following nested else-if statements so
+	// calls inside a trailing else body are reached.
+	var rewriteElseChain func(elseStmt ast.Stmt) error
+	rewriteElseChain = func(elseStmt ast.Stmt) error {
+		switch e := elseStmt.(type) {
+		case *ast.BlockStmt:
+			return rewriteBlock(e)
+		case *ast.IfStmt:
+			if err := rewriteBlock(e.Body); err != nil {
+				return err
+			}
+			if e.Else != nil {
+				return rewriteElseChain(e.Else)
+			}
+			return nil
+		}
+		return nil
 	}
 
 	rewriteBlock = func(blk *ast.BlockStmt) error {
@@ -1012,15 +1031,8 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 					return err
 				}
 				if s.Else != nil {
-					switch e := s.Else.(type) {
-					case *ast.BlockStmt:
-						if err := rewriteBlock(e); err != nil {
-							return err
-						}
-					case *ast.IfStmt:
-						if err := rewriteBlock(e.Body); err != nil {
-							return err
-						}
+					if err := rewriteElseChain(s.Else); err != nil {
+						return err
 					}
 				}
 			case *ast.ForStmt:
@@ -1310,10 +1322,12 @@ func visibleDeclsBefore(fn *ast.FuncDecl, retPos token.Pos) []declInfo {
 			return true
 		}
 
-		// If a block-like node ends before retPos, nothing inside it is visible
+		// If a block-like node ends before retPos, nothing inside it is visible.
+		// CaseClause/CommClause pruning matters since their Comm/expressions are visited
+		// before the clause body, which would otherwise leak sibling comm variables.
 		switch n.(type) {
-		case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
-			*ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.CaseClause:
+		case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt,
+			*ast.TypeSwitchStmt, *ast.SelectStmt, *ast.CaseClause, *ast.CommClause:
 			if n.End() < retPos {
 				return false // prune subtree
 			}
