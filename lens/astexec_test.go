@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -667,5 +668,93 @@ func TestFilterModulesByGoVersion(t *testing.T) {
 
 		assert.Equal(t, 0, skipped)
 		assert.Len(t, filtered, 1)
+	})
+}
+
+func TestHandleFuncPointStateWaitBalance(t *testing.T) {
+	t.Parallel()
+
+	callerIdent := "pkg.CallerFunc"
+	extensionIdent := "extension:hook"
+	tFunc := &TestFunction{Function: Function{FunctionIdent: "pkg.TestFunc", FunctionName: "TestFunc"}}
+
+	newMonitor := func(projectDir string) *testMonitor {
+		return newTestMonitor(nil, "", projectDir,
+			map[uint32]*string{1: &callerIdent}, nil, nil, nil,
+			map[uint32]*string{2: &extensionIdent})
+	}
+	pointStateMsg := func(projectDir string, pointId uint32) LensMonitorMessagePointState {
+		return LensMonitorMessagePointState{
+			PointID: pointId,
+			TimeNS:  1_000_000,
+			Stack: []lensMonitorStackFrame{
+				{File: filepath.Join(projectDir, "main.go"), Line: 12, Function: callerIdent},
+			},
+			Fields: []LensMonitorField{{Name: "arg0", Type: "int64", Value: int64(7)}},
+		}
+	}
+	// makeTestResult has no timeout, poll async so a leaked counter fails rather than hangs
+	waitForResult := func(t *testing.T, monitor *testMonitor) TestResult {
+		t.Helper()
+
+		done := make(chan TestResult, 1)
+		go func() {
+			done <- monitor.makeTestResult(tFunc, false)
+		}()
+
+		var result TestResult
+		require.Eventually(t, func() bool {
+			select {
+			case result = <-done:
+				return true
+			default:
+				return false
+			}
+		}, 10*time.Second, 10*time.Millisecond)
+		return result
+	}
+
+	t.Run("unknown_point_id_dropped", func(t *testing.T) {
+		projectDir := t.TempDir()
+		monitor := newMonitor(projectDir)
+
+		monitor.HandleFuncPointState(pointStateMsg(projectDir, 999))
+
+		result := waitForResult(t, monitor)
+		assert.Empty(t, result.CallerResults)
+		assert.Empty(t, result.ExtensionFrames)
+		assert.Equal(t, uint32(0), monitor.fieldCheckCount.Load())
+	})
+
+	t.Run("unknown_then_known_point_id", func(t *testing.T) {
+		projectDir := t.TempDir()
+		monitor := newMonitor(projectDir)
+
+		monitor.HandleFuncPointState(pointStateMsg(projectDir, 999))
+		monitor.HandleFuncPointState(pointStateMsg(projectDir, 1))
+
+		result := waitForResult(t, monitor)
+		assert.Empty(t, result.ExtensionFrames)
+		frames, ok := result.CallerResults[callerIdent]
+		require.True(t, ok)
+		require.Len(t, frames, 1)
+		assert.Equal(t, map[string]string{"arg0": "7"}, frames[0].FieldValues.FlattenFieldValues())
+		assert.Equal(t, "./main.go", frames[0].Stack[0].File)
+		assert.Equal(t, uint32(1), monitor.fieldCheckCount.Load())
+	})
+
+	t.Run("extension_point_id_recorded", func(t *testing.T) {
+		projectDir := t.TempDir()
+		monitor := newMonitor(projectDir)
+
+		monitor.HandleFuncPointState(pointStateMsg(projectDir, 2))
+
+		result := waitForResult(t, monitor)
+		assert.Empty(t, result.CallerResults)
+		frames, ok := result.ExtensionFrames[extensionIdent]
+		require.True(t, ok)
+		require.Len(t, frames, 1)
+		assert.Equal(t, map[string]string{"arg0": "7"}, frames[0].FieldValues.FlattenFieldValues())
+		assert.Equal(t, uint32(1), monitor.fieldCheckCount.Load())
 	})
 }

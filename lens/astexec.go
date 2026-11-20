@@ -698,8 +698,6 @@ func (t *testMonitor) HandleFuncPoint(msg LensMonitorMessagePoint) {
 }
 
 func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
-	t.wait.Add(1) // done in routine
-
 	if monitorDebugLogging {
 		debugLogMonitorStack(msg.PointID, msg.Stack)
 		fmt.Printf(">> State fields for point %v:\n", msg.PointID)
@@ -731,7 +729,9 @@ func (t *testMonitor) HandleFuncPointState(msg LensMonitorMessagePointState) {
 		storageKey = *callerIdent
 	}
 
+	// increment only once recording is guaranteed, unknown ids must not inflate the counter
 	lock := t.pointLocks.Lock(storageKey)
+	t.wait.Add(1) // done in routine
 	go func() {
 		defer t.wait.Done()
 		defer lock.Unlock()
