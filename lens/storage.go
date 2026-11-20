@@ -162,7 +162,9 @@ func (m *memStorage) Close() {
 const badgerSplitBuffer = 16         // small extra buffer to avoid ever hitting the max anywhere
 const badgerSplitLogFileBuffer = 240 // extra log file space compared to max value size
 const splitPrefixString = "badger_split:"
-const badgerCompression = options.ZSTD // disabling db compression results in less splitting, but benchmarks are worse
+
+// badgerCompression is only a var so tests can exercise the manual compression path.
+var badgerCompression = options.ZSTD // disabling db compression results in less splitting, but benchmarks are worse
 
 // badgerSplitLimit is max size before value split, updated by tests to reduce test overhead.
 var badgerSplitLimit = (1 << 30) - badgerSplitBuffer - badgerSplitLogFileBuffer
@@ -292,7 +294,6 @@ func (b *badgerStorage) SaveState(key string, blob []byte) error {
 
 func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 	var stored []byte
-	var decompressedSize int
 	// single view keeps marker and parts on one snapshot,
 	// concurrent saves cannot tear the reassembled value
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -328,10 +329,6 @@ func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 		if err != nil {
 			return fmt.Errorf("failed to parse compressed size: %w", err)
 		}
-		decompressedSize, err = strconv.Atoi(string(m[3]))
-		if err != nil {
-			return fmt.Errorf("failed to parse decompressed size: %w", err)
-		}
 
 		var buf []byte
 		for i := 0; i < count; i++ {
@@ -361,12 +358,14 @@ func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 	}
 
 	if badgerCompression == options.None { // manually decompress
-		decompressedBuffer := make([]byte, decompressedSize) // prepare buffer since we know the exact size
-		decompressed, err := ZstdDecompress(decompressedBuffer, stored)
-		return decompressed, true, err
-	} else {
-		return stored, true, nil
+		// DecodeAll appends to dst, a length pre-sized destination would prefix zeros onto the output
+		decompressed, err := ZstdDecompress(nil, stored)
+		if err != nil {
+			return nil, false, err
+		}
+		return decompressed, true, nil
 	}
+	return stored, true, nil
 }
 
 func (b *badgerStorage) DeleteState(key string) error {

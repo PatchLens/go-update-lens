@@ -2,6 +2,7 @@ package lens
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
@@ -420,6 +422,75 @@ func TestBadgerStorageSplitChurn(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, splitB, got)
 	require.Positive(t, found) // reads must have observed values mid-churn
+}
+
+func TestBadgerStorageManualCompression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+
+	oldLimit := badgerSplitLimit
+	badgerSplitLimit = 16 * 1024 // force split values at a test friendly size
+	t.Cleanup(func() { badgerSplitLimit = oldLimit })
+	oldCompression := badgerCompression
+	badgerCompression = options.None
+	t.Cleanup(func() { badgerCompression = oldCompression })
+
+	path := filepath.Join(t.TempDir(), "manual")
+	store, err := NewBadgerStorage(path, 50)
+	require.NoError(t, err)
+	t.Cleanup(store.Close)
+	bs := store.(*badgerStorage)
+
+	rawValue := func(key string) []byte {
+		var raw []byte
+		require.NoError(t, bs.db.View(func(txn *badger.Txn) error {
+			item, err := txn.Get([]byte(key))
+			if err != nil {
+				return err
+			}
+			return item.Value(func(v []byte) error {
+				raw = append([]byte(nil), v...)
+				return nil
+			})
+		}))
+		return raw
+	}
+
+	t.Run("whole_value_round_trip", func(t *testing.T) {
+		data := []byte("small manually compressed payload")
+		require.NoError(t, store.SaveState("whole", data))
+
+		assert.Nil(t, splitRe.FindSubmatch(rawValue("whole"))) // no marker means stored whole
+		got, ok, err := store.LoadState("whole")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, data, got)
+	})
+
+	t.Run("split_value_round_trip", func(t *testing.T) {
+		data := make([]byte, 2*badgerSplitLimit+100)
+		_, err := crand.Read(data) // random bytes resist compression, keeping the blob above the split limit
+		require.NoError(t, err)
+		require.NoError(t, store.SaveState("split", data))
+
+		assert.NotNil(t, splitRe.FindSubmatch(rawValue("split"))) // marker means stored as parts
+		got, ok, err := store.LoadState("split")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, data, got)
+	})
+
+	t.Run("corrupt_decode_not_found", func(t *testing.T) {
+		require.NoError(t, bs.db.Update(func(txn *badger.Txn) error {
+			return txn.Set([]byte("corrupt"), []byte{0x42, 0x43, 0x44}) // not a zstd frame
+		}))
+
+		got, ok, err := store.LoadState("corrupt")
+		require.Error(t, err)
+		assert.False(t, ok)
+		assert.Nil(t, got)
+	})
 }
 
 func TestMemStorage(t *testing.T) {
