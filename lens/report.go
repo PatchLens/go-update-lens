@@ -615,15 +615,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 	down2Opt.BarSize = down1LeftOpt.BarSize
 	down2Opt.SeriesList[1].Label.Show = charts.Ptr(true)
 	down2Opt.SeriesList[1].Label.ValueFormatter = func(f float64) string {
-		if totalPreTime == 0 {
-			return "No time recorded"
-		}
-		ratio := totalPostTime / totalPreTime
-		if totalPostTime <= totalPreTime { // improvement, ratio <= 1
-			return charts.FormatValueHumanize(100.0-(ratio*100.0), 1, false) + "% faster"
-		} else {
-			return charts.FormatValueHumanize((1-ratio)*100.0, 1, false) + "% slower"
-		}
+		return performanceChangeLabel(totalPreTime, totalPostTime)
 	}
 	if err := down2.BarChart(down2Opt); err != nil {
 		return resultBox, fmt.Errorf("error rendering chart: %w", err)
@@ -793,6 +785,19 @@ func compareRiskyTests(a, b []string) int {
 	}
 
 	return 0
+}
+
+// performanceChangeLabel renders the total pre to post time change as a
+// percentage label, "No time recorded" when no pre-update time exists.
+func performanceChangeLabel(totalPreTime, totalPostTime float64) string {
+	if totalPreTime == 0 {
+		return "No time recorded"
+	}
+	ratio := totalPostTime / totalPreTime
+	if totalPostTime <= totalPreTime { // improvement, ratio <= 1
+		return charts.FormatValueHumanize(100.0-(ratio*100.0), 1, false) + "% faster"
+	}
+	return charts.FormatValueHumanize((ratio-1.0)*100.0, 1, false) + "% slower"
 }
 
 func firstValueSeriesRankColor(theme charts.ColorPalette, sl charts.BarSeriesList) charts.Color {

@@ -33,6 +33,71 @@ func TestRootModule(t *testing.T) {
 	})
 }
 
+func TestPerformanceChangeLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		totalPreTime  float64
+		totalPostTime float64
+		want          string
+	}{
+		{
+			name:          "no_time_recorded",
+			totalPreTime:  0,
+			totalPostTime: 0,
+			want:          "No time recorded",
+		},
+		{
+			name:          "post_time_without_pre",
+			totalPreTime:  0,
+			totalPostTime: 50,
+			want:          "No time recorded",
+		},
+		{
+			name:          "improvement",
+			totalPreTime:  100,
+			totalPostTime: 80,
+			want:          "20% faster",
+		},
+		{
+			name:          "equal_times",
+			totalPreTime:  100,
+			totalPostTime: 100,
+			want:          "0% faster",
+		},
+		{
+			name:          "fractional_improvement",
+			totalPreTime:  3,
+			totalPostTime: 1,
+			want:          "66.7% faster",
+		},
+		{
+			name:          "regression",
+			totalPreTime:  100,
+			totalPostTime: 120,
+			want:          "20% slower",
+		},
+		{
+			name:          "fractional_regression",
+			totalPreTime:  3,
+			totalPostTime: 4,
+			want:          "33.3% slower",
+		},
+		{
+			name:          "multi_fold_regression",
+			totalPreTime:  1,
+			totalPostTime: 3,
+			want:          "200% slower",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, performanceChangeLabel(tt.totalPreTime, tt.totalPostTime))
+		})
+	}
+}
+
 func TestCompareRiskyTests(t *testing.T) {
 	t.Parallel()
 
