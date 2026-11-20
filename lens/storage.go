@@ -291,7 +291,10 @@ func (b *badgerStorage) SaveState(key string, blob []byte) error {
 }
 
 func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
-	var raw []byte
+	var stored []byte
+	var decompressedSize int
+	// single view keeps marker and parts on one snapshot,
+	// concurrent saves cannot tear the reassembled value
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
 		if err != nil {
@@ -300,53 +303,61 @@ func (b *badgerStorage) LoadState(key string) ([]byte, bool, error) {
 			}
 			return err
 		}
-		return item.Value(func(v []byte) error {
+		var raw []byte
+		if err := item.Value(func(v []byte) error {
 			raw = append([]byte(nil), v...)
 			return nil
-		})
-	})
-	if err != nil {
-		return nil, false, err
-	} else if raw == nil {
-		return nil, false, nil
-	}
+		}); err != nil {
+			return err
+		} else if raw == nil { // empty value, nothing stored
+			return nil
+		}
 
-	var stored []byte
-	var decompressedSize int
-	if m := splitRe.FindSubmatch(raw); m == nil {
-		stored = raw // it was stored whole
-	} else { // reassemble split value
+		m := splitRe.FindSubmatch(raw)
+		if m == nil {
+			stored = raw // it was stored whole
+			return nil
+		}
 		count, err := strconv.Atoi(string(m[1]))
 		if err != nil {
-			return nil, false, fmt.Errorf("failed to parse value count: %w", err)
+			return fmt.Errorf("failed to parse value count: %w", err)
+		} else if count <= 0 {
+			return fmt.Errorf("invalid split value part count: %d", count)
 		}
 		compressedSize, err := strconv.Atoi(string(m[2]))
 		if err != nil {
-			return nil, false, fmt.Errorf("failed to parse compressed size: %w", err)
+			return fmt.Errorf("failed to parse compressed size: %w", err)
 		}
 		decompressedSize, err = strconv.Atoi(string(m[3]))
 		if err != nil {
-			return nil, false, fmt.Errorf("failed to parse decompressed size: %w", err)
+			return fmt.Errorf("failed to parse decompressed size: %w", err)
 		}
-		stored = make([]byte, compressedSize)
-		var off int
-		if err := b.db.View(func(txn *badger.Txn) error {
-			for i := 0; i < count; i++ {
-				item, err := txn.Get([]byte(fmt.Sprintf("%s%s-%d", splitPrefixString, key, i)))
-				if err != nil {
-					return fmt.Errorf("large value failure on part %d: %w", i, err)
-				} else if err := item.Value(func(v []byte) error {
-					copy(stored[off:], v)
-					off += len(v)
-					return nil
-				}); err != nil {
-					return err
-				}
+
+		var buf []byte
+		for i := 0; i < count; i++ {
+			part, err := txn.Get([]byte(fmt.Sprintf("%s%s-%d", splitPrefixString, key, i)))
+			if err != nil {
+				return fmt.Errorf("large value failure on part %d: %w", i, err)
 			}
-			return nil
-		}); err != nil {
-			return nil, false, err
+			if err := part.Value(func(v []byte) error {
+				buf = append(buf, v...)
+				return nil
+			}); err != nil {
+				return err
+			}
 		}
+		// size must agree with the marker, guards against corrupt split state
+		if len(buf) != compressedSize {
+			return fmt.Errorf("split value length mismatch: read %d bytes, marker claims %d",
+				len(buf), compressedSize)
+		}
+		stored = buf
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	} else if stored == nil {
+		return nil, false, nil
 	}
 
 	if badgerCompression == options.None { // manually decompress
