@@ -830,6 +830,18 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 		return firstErr
 	}
 
+	// rescanPreStmts instruments targets inside FuncLits that buildCallInstrumentationWithArgs
+	// extracted into pre-statements. Those expressions left st, so rewriteFuncLitsIn(st) can no
+	// longer reach them.
+	rescanPreStmts := func(preStmts []ast.Stmt) error {
+		for _, preStmt := range preStmts {
+			if err := rewriteFuncLitsIn(preStmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// rewriteElseChain descends into an else branch, following nested else-if statements so
 	// calls inside a trailing else body are reached.
 	var rewriteElseChain func(elseStmt ast.Stmt) error
@@ -901,10 +913,8 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 					// target calls inside them. We do this here rather than using
 					// rewriteFuncLitsIn on the whole statement to avoid re-instrumenting
 					// the call we just wrapped.
-					for _, preStmt := range preStmts {
-						if err := rewriteFuncLitsIn(preStmt); err != nil {
-							return err
-						}
+					if err := rescanPreStmts(preStmts); err != nil {
+						return err
 					}
 
 					newStmts = append(newStmts, st)
@@ -936,10 +946,8 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 					}
 
 					// Recurse into any FuncLits in the preStmts (same as DeferStmt)
-					for _, preStmt := range preStmts {
-						if err := rewriteFuncLitsIn(preStmt); err != nil {
-							return err
-						}
+					if err := rescanPreStmts(preStmts); err != nil {
+						return err
 					}
 
 					newStmts = append(newStmts, st)
@@ -1016,6 +1024,11 @@ func (m *ASTModifier) InjectFuncPointBeforeCall(fn *Function, shouldInject func(
 				// Do not wrap in a block as this would scope any variables declared in st
 				newStmts = append(newStmts, preStmts...)
 				newStmts = append(newStmts, st)
+
+				// Rescan extracted arguments to instrument targets inside their FuncLits.
+				if err := rescanPreStmts(preStmts); err != nil {
+					return err
+				}
 			} else {
 				newStmts = append(newStmts, st)
 			}

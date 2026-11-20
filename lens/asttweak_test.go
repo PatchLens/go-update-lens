@@ -3809,6 +3809,31 @@ func Outer() {
 			description:    "Both outer Target and inner Target inside FuncLit arg should be instrumented",
 		},
 		{
+			name: "call_with_funclit_arg_containing_target",
+			src: `package testpkg
+
+func Target(x int) int { return x }
+
+func Outer() {
+	Target(func() int { return Target(1) }())
+}`,
+			expectedPoints: 2,
+			description:    "Both outer Target and inner Target inside FuncLit arg should be instrumented",
+		},
+		{
+			name: "call_multiple_funclit_args_with_targets",
+			src: `package testpkg
+
+func Add(a, b int) int { return a + b }
+
+func Outer() {
+	_ = Add(func() int { return Add(1, 2) }(), func() int { return Add(3, 4) }())
+}`,
+			expectedPoints: 3,
+			description:    "Outer Add and both inner Add calls inside extracted FuncLit args should be instrumented",
+			targetFunc:     "Add",
+		},
+		{
 			name: "struct_field_funclit_protobuf_pattern",
 			src: `package testpkg
 
@@ -3882,15 +3907,21 @@ func Setup() {
 				FilePath:      filePath,
 			}
 
-			// Only match target function calls
-			pointMap, err := modifier.InjectFuncPointBeforeCall(&fn, func(call *ast.CallExpr) (any, bool) {
+			predicate := func(call *ast.CallExpr) (any, bool) {
 				if ident, ok := call.Fun.(*ast.Ident); ok {
 					return struct{}{}, ident.Name == targetFunc
 				}
 				return struct{}{}, false
-			})
+			}
+
+			pointMap, err := modifier.InjectFuncPointBeforeCall(&fn, predicate)
 			require.NoError(t, err, tc.description)
 			assert.Len(t, pointMap, tc.expectedPoints, tc.description)
+
+			// second injection is a no-op; the send-point guard skips instrumented statements
+			rerunPointMap, err := modifier.InjectFuncPointBeforeCall(&fn, predicate)
+			require.NoError(t, err)
+			assert.Empty(t, rerunPointMap)
 
 			require.NoError(t, modifier.CommitFile(filePath))
 
@@ -3898,13 +3929,12 @@ func Setup() {
 			require.NoError(t, err)
 			modifiedStr := string(modifiedSrc)
 
-			// Verify the monitoring call was inserted
-			assert.Contains(t, modifiedStr, sendLensPointStateMessageFunc)
-
-			// Verify the code compiles
+			// Verify the code compiles and each expected point emits exactly one send call
 			fset := token.NewFileSet()
 			_, err = parser.ParseFile(fset, filePath, modifiedSrc, parser.AllErrors)
 			require.NoError(t, err)
+			assert.Equal(t, tc.expectedPoints,
+				countFunctionCalls(t, modifiedSrc, sendLensPointStateMessageFunc), tc.description)
 
 			// For the "funclit_with_params_not_extracted" test, verify that
 			// the FuncLit params are NOT extracted outside the FuncLit
