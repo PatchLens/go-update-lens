@@ -402,14 +402,14 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 
 	// compare the pre and post module update field values
 	var sameCount, diffCount int
-	testReports := make([]TestReport, len(postResultsNames))
+	testReports := make([]TestReport, 0, len(postResultsNames))
 	var performanceLogBuffer strings.Builder
-	for i, funcIdent := range postResultsNames {
+	for _, funcIdent := range postResultsNames {
 		preResults, found, err := d.loadTestResult(preResultStorage, funcIdent)
 		if err != nil {
 			return 0, 0, nil, fmt.Errorf("error loading pre-results for %s: %w", funcIdent, err)
 		} else if !found {
-			log.Printf("WARN: post‑update test %s not in pre‑results", funcIdent)
+			log.Printf("WARN: post-update test %s not in pre-results", funcIdent)
 			continue
 		}
 		postResults, found, err := d.loadTestResult(postResultStorage, funcIdent)
@@ -591,7 +591,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 		postResults.CallerResults = nil
 		postResults.ProjectPanics = nil
 		postResults.ModulePanics = nil
-		testReports[i] = TestReport{
+		testReports = append(testReports, TestReport{
 			OriginalResult:      preResults,
 			PostUpdateResult:    postResults,
 			CallerFieldChanges:  callerFieldChanges,
@@ -599,7 +599,7 @@ func (d *DefaultTestResultAnalyzer) CompareTestResults(preResultStorage, postRes
 			TestRegressionCount: testRegressionCount,
 			SameFieldCount:      testSameCount,
 			DiffFieldCount:      testDiffCount,
-		}
+		})
 	}
 
 	if performanceLogBuffer.Len() > 0 {

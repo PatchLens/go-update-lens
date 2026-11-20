@@ -159,10 +159,10 @@ func TestAnalysisEngine_Run(t *testing.T) {
 
 		// Create mock storage with test data
 		preStorage := NewMemStorage()
-		err := preStorage.SaveState("test.func", createMockTestResultBytes(t, "TestFunc"))
+		err := preStorage.SaveState("test.func", createMockTestResultBytes(t, "test.func", "TestFunc", "value1"))
 		require.NoError(t, err)
 		postStorage := NewMemStorage()
-		err = postStorage.SaveState("test.func", createMockTestResultBytes(t, "TestFunc"))
+		err = postStorage.SaveState("test.func", createMockTestResultBytes(t, "test.func", "TestFunc", "value1"))
 		require.NoError(t, err)
 
 		engine := NewAnalysisEngineWithProviders(
@@ -411,38 +411,91 @@ func TestAnalysisEngine_parseInitialModules(t *testing.T) {
 	})
 }
 
-func TestAnalysisEngine_compareTestResults(t *testing.T) {
-	t.Run("basic_comparison", func(t *testing.T) {
+func TestDefaultTestResultAnalyzer_CompareTestResults(t *testing.T) {
+	t.Run("all_results_matched", func(t *testing.T) {
 		t.Parallel()
 
-		// Create mock storage with test data
 		preStorage := NewMemStorage()
-		err := preStorage.SaveState("test.func", createMockTestResultBytes(t, "TestFunc"))
+		err := preStorage.SaveState("pkg.TestA", createMockTestResultBytes(t, "pkg.TestA", "TestA", "value1"))
 		require.NoError(t, err)
 		postStorage := NewMemStorage()
-		err = postStorage.SaveState("test.func", createMockTestResultBytes(t, "TestFunc"))
+		err = postStorage.SaveState("pkg.TestA", createMockTestResultBytes(t, "pkg.TestA", "TestA", "value2"))
 		require.NoError(t, err)
 
-		analyzer := &mockTestResultAnalyzer{
-			sameCount: 1,
-			diffCount: 0,
-			testReports: []TestReport{{
-				OriginalResult: TestResult{
-					TestFunction: MinimumTestFunction{FunctionName: "TestFunc"},
-				},
-				PostUpdateResult: TestResult{
-					TestFunction: MinimumTestFunction{FunctionName: "TestFunc"},
-				},
-				SameFieldCount: 1,
-				DiffFieldCount: 0,
-			}},
-		}
+		analyzer := &DefaultTestResultAnalyzer{}
 		sameCount, diffCount, testReports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
 		require.NoError(t, err)
 
-		assert.GreaterOrEqual(t, sameCount, 0)
-		assert.GreaterOrEqual(t, diffCount, 0)
-		assert.Len(t, testReports, 1)
+		assert.Equal(t, 0, sameCount)
+		assert.Equal(t, 1, diffCount)
+		require.Len(t, testReports, 1)
+		assert.Equal(t, "pkg.TestA", testReports[0].OriginalResult.TestFunction.FunctionIdent)
+		assert.Equal(t, "pkg.TestA", testReports[0].PostUpdateResult.TestFunction.FunctionIdent)
+		assert.Len(t, testReports[0].CallerFieldChanges["test.caller"], 1)
+	})
+
+	t.Run("skips_missing_pre_results", func(t *testing.T) {
+		t.Parallel()
+
+		preStorage := NewMemStorage()
+		err := preStorage.SaveState("pkg.TestA", createMockTestResultBytes(t, "pkg.TestA", "TestA", "value1"))
+		require.NoError(t, err)
+		postStorage := NewMemStorage()
+		err = postStorage.SaveState("pkg.TestA", createMockTestResultBytes(t, "pkg.TestA", "TestA", "value1"))
+		require.NoError(t, err)
+		err = postStorage.SaveState("pkg.TestB", createMockTestResultBytes(t, "pkg.TestB", "TestB", "value1"))
+		require.NoError(t, err)
+
+		analyzer := &DefaultTestResultAnalyzer{}
+		sameCount, diffCount, testReports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
+		require.NoError(t, err)
+
+		// skipped test counts nothing and must not leave a zero-value report row
+		assert.Equal(t, 1, sameCount)
+		assert.Equal(t, 0, diffCount)
+		require.Len(t, testReports, 1)
+		assert.Equal(t, "pkg.TestA", testReports[0].OriginalResult.TestFunction.FunctionIdent)
+
+		// no phantom rows surface in report details
+		_, _, _, _, testDetails, _, _ := PrepareReportData(nil, nil, nil, testReports, 0)
+		require.Len(t, testDetails, 1)
+		assert.Equal(t, "pkg.TestA", testDetails[0].TestFunctionIdent)
+	})
+
+	t.Run("all_pre_results_missing", func(t *testing.T) {
+		t.Parallel()
+
+		preStorage := NewMemStorage()
+		postStorage := NewMemStorage()
+		err := postStorage.SaveState("pkg.TestA", createMockTestResultBytes(t, "pkg.TestA", "TestA", "value1"))
+		require.NoError(t, err)
+
+		analyzer := &DefaultTestResultAnalyzer{}
+		sameCount, diffCount, testReports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, sameCount)
+		assert.Equal(t, 0, diffCount)
+		assert.Empty(t, testReports)
+	})
+
+	t.Run("pre_result_load_error", func(t *testing.T) {
+		t.Parallel()
+
+		preStorage := NewMemStorage()
+		err := preStorage.SaveState("pkg.TestA", []byte("invalid-msgpack"))
+		require.NoError(t, err)
+		postStorage := NewMemStorage()
+		err = postStorage.SaveState("pkg.TestA", createMockTestResultBytes(t, "pkg.TestA", "TestA", "value1"))
+		require.NoError(t, err)
+
+		analyzer := &DefaultTestResultAnalyzer{}
+		sameCount, diffCount, testReports, err := analyzer.CompareTestResults(preStorage, postStorage, 2)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error loading pre-results for pkg.TestA")
+		assert.Equal(t, 0, sameCount)
+		assert.Equal(t, 0, diffCount)
+		assert.Nil(t, testReports)
 	})
 }
 
@@ -476,20 +529,20 @@ func TestNewAnalysisEngine(t *testing.T) {
 	})
 }
 
-// Helper function to create mock test result bytes
-func createMockTestResultBytes(t *testing.T, funcName string) []byte {
+func createMockTestResultBytes(t *testing.T, funcIdent, funcName, fieldValue string) []byte {
 	t.Helper()
 
 	testResult := TestResult{
 		TestFunction: MinimumTestFunction{
-			FunctionName: funcName,
+			FunctionIdent: funcIdent,
+			FunctionName:  funcName,
 		},
 		CallerResults: map[string][]CallFrame{
 			"test.caller": {
 				{
 					FieldValues: FieldValues{
 						"field1": &FieldValue{
-							Value: "value1",
+							Value: fieldValue,
 						},
 					},
 					TimeMillis: 100,
