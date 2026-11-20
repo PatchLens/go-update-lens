@@ -1,7 +1,6 @@
 package lens
 
 import (
-	"errors"
 	"io"
 	"log"
 	"os"
@@ -82,11 +81,8 @@ func ExecGoTest(dir string, env []string, output io.Writer, tFunc *TestFunction)
 	cmd.Stderr = output
 	err := cmd.Run()
 
-	if err != nil { // Check for OOM kill (exit code 137)
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 137 {
-			log.Printf("WARN: test process killed by OOM (out of memory) - %v", err)
-		}
+	if processKilledBySIGKILL(err) { // SIGKILL of go test is likely an OOM kill
+		log.Printf("WARN: test process likely killed by OOM (SIGKILL) - %v", err)
 	}
 	return err
 }

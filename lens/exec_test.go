@@ -1,7 +1,11 @@
 package lens
 
 import (
+	"io"
+	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -150,4 +154,82 @@ func TestNewProjectCapturedOutputExec(t *testing.T) {
 
 	assert.Contains(t, result, "stdout")
 	assert.Contains(t, result, "stderr")
+}
+
+func TestProcessKilledBySIGKILL(t *testing.T) {
+	t.Parallel()
+
+	runSh := func(script string) error {
+		return exec.Command("sh", "-c", script).Run()
+	}
+
+	testCases := []struct {
+		name         string
+		err          error
+		expectKilled bool
+	}{
+		{"nil_error", nil, false},
+		{"sigkill_death", runSh("kill -9 $$"), true},
+		{"normal_exit_137", runSh("exit 137"), false},
+		{"normal_exit_one", runSh("exit 1"), false},
+		{"command_not_found", exec.Command("lens-no-such-command").Run(), false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expectKilled, processKilledBySIGKILL(tc.err))
+		})
+	}
+}
+
+func TestExecGoTestOOMWarning(t *testing.T) {
+	// Mutates PATH and the global log writer, DO NOT RUN IN PARALLEL
+	origLogWriter := log.Writer()
+	t.Cleanup(func() { log.SetOutput(origLogWriter) })
+
+	testCases := []struct {
+		name          string
+		script        string
+		expectErr     require.ErrorAssertionFunc
+		expectOOMWarn bool
+	}{
+		{
+			name:          "sigkill_warns",
+			script:        "#!/bin/sh\nkill -9 $$\n",
+			expectErr:     require.Error,
+			expectOOMWarn: true,
+		},
+		{
+			name:      "exit_137_no_warning",
+			script:    "#!/bin/sh\nexit 137\n",
+			expectErr: require.Error,
+		},
+		{
+			name:      "clean_exit_no_warning",
+			script:    "#!/bin/sh\nexit 0\n",
+			expectErr: require.NoError,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			goBin := filepath.Join(binDir, "go")
+			require.NoError(t, os.WriteFile(goBin, []byte(tc.script), 0o755))
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			logBuf := newLockedBuffer()
+			log.SetOutput(logBuf)
+
+			tFunc := &TestFunction{Function: Function{FunctionName: "TestSomething"}}
+			err := ExecGoTest(t.TempDir(), nil, io.Discard, tFunc)
+
+			tc.expectErr(t, err)
+			if tc.expectOOMWarn {
+				assert.Contains(t, logBuf.String(), "killed by OOM")
+			} else {
+				assert.NotContains(t, logBuf.String(), "killed by OOM")
+			}
+		})
+	}
 }
