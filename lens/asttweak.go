@@ -74,6 +74,14 @@ type ASTModifier struct {
 	fileNodeMap    sync.Map
 	commitLock     sync.Mutex
 	commitActions  map[string]func(*bytes.Buffer) error
+	// injectedFileWriter persists generated files, swappable in tests to simulate
+	// write failures.
+	injectedFileWriter func(path string, data []byte, perm fs.FileMode) error
+}
+
+// newASTModifier returns a modifier with the default injected file writer.
+func newASTModifier() *ASTModifier {
+	return &ASTModifier{injectedFileWriter: os.WriteFile}
 }
 
 func goCacheClean(goenv []string) error {
@@ -256,6 +264,8 @@ func (m *ASTModifier) Commit() error {
 }
 
 // InjectASTClient prepares a package directory by inserting the configured client code to enable other AST point functions.
+// On failure no generated files are left in pkgDir, so a retry is not blocked by the
+// injected filename glob check.
 func (m *ASTModifier) InjectASTClient(pkgDir string, srvPort int, maxFieldRecurse, maxFieldLen int) error {
 	if matches, _ := filepath.Glob(filepath.Join(pkgDir, injectedFilenamePrefix+"*_gen.go")); len(matches) > 0 {
 		return nil // already been injected into the package
@@ -271,34 +281,50 @@ func (m *ASTModifier) InjectASTClient(pkgDir string, srvPort int, maxFieldRecurs
 		return fmt.Errorf("load embedded astapi: %w", err)
 	}
 
-	// rewrite package and replace const values
-	var buf bytes.Buffer
+	// rewrite both templates before any file is written so rewrite failures cannot
+	// leave a partial injection behind. Distinct buffers since the rewrite result
+	// aliases the provided buffer.
+	var clientBuf, apiBuf bytes.Buffer
 	pkgName, err := detectPackageName(pkgDir)
 	if err != nil {
 		return err
 	}
-	clientFile := filepath.Join(pkgDir, injectedFilenamePrefix+"client_gen.go")
-	clientTxt, err := rewriteAstClientTemplate(&buf, clientSrc, pkgName, map[string]string{
+	clientTxt, err := rewriteAstClientTemplate(&clientBuf, clientSrc, pkgName, map[string]string{
 		"lensMonitorServerPort":      strconv.Itoa(srvPort),
 		"lensMonitorFieldMaxRecurse": strconv.Itoa(maxFieldRecurse),
 		"lensMonitorFieldMaxLen":     strconv.Itoa(maxFieldLen),
 	})
 	if err != nil {
 		return fmt.Errorf("rewrite astclient failure: %w", err)
-	} else if err := os.WriteFile(clientFile, clientTxt, 0o644); err != nil {
-		return err
 	}
-	apiFile := filepath.Join(pkgDir, injectedFilenamePrefix+"api_gen.go")
-	apiTxt, err := rewriteAstClientTemplate(&buf, apiSrc, pkgName, nil)
+	apiTxt, err := rewriteAstClientTemplate(&apiBuf, apiSrc, pkgName, nil)
 	if err != nil {
 		return fmt.Errorf("rewrite astapi failure: %w", err)
-	} else if err := os.WriteFile(apiFile, apiTxt, 0o644); err != nil {
-		return err
+	}
+
+	clientFile := filepath.Join(pkgDir, injectedFilenamePrefix+"client_gen.go")
+	if err := m.injectedFileWriter(clientFile, clientTxt, 0o644); err != nil {
+		return removeInjectedFiles(fmt.Errorf("write astclient failure: %w", err), clientFile)
+	}
+	apiFile := filepath.Join(pkgDir, injectedFilenamePrefix+"api_gen.go")
+	if err := m.injectedFileWriter(apiFile, apiTxt, 0o644); err != nil {
+		return removeInjectedFiles(fmt.Errorf("write astapi failure: %w", err), clientFile, apiFile)
 	}
 	m.addCleanupAction(func() error {
 		return errors.Join(os.Remove(clientFile), os.Remove(apiFile))
 	})
 	return nil
+}
+
+// removeInjectedFiles best-effort removes the given generated files and joins any
+// removal failures onto err. Files that do not exist are ignored.
+func removeInjectedFiles(err error, paths ...string) error {
+	for _, path := range paths {
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			err = errors.Join(err, rmErr)
+		}
+	}
+	return err
 }
 
 func makeFileFilter(dir string) func(fi fs.FileInfo) bool {

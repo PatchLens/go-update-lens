@@ -186,7 +186,7 @@ func runMonitoredTestAnalysis(env []string, maxVariableRecurse, maxFieldLen int,
 	moduleChanges []*ModuleFunction, callerFunctions []*CallerFunction, testFunctions []*TestFunction,
 	preUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error),
 	postUpdateExtensionConfig func(*ASTModifier) (map[uint32]*string, error)) (int, int, error) {
-	astEditor := &ASTModifier{}
+	astEditor := newASTModifier()
 	defer func() {
 		errs := astEditor.Restore(env)
 		if len(errs) > 0 {

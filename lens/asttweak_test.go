@@ -2,12 +2,14 @@ package lens
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -4274,7 +4276,7 @@ func Foo() int {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4297,7 +4299,7 @@ func Foo() int {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 
 		// First injection
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
@@ -4350,7 +4352,7 @@ go 1.21
 `
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 
 		// Inject into pkgB (no error expected)
 		err := mod.InjectASTClient(pkgBDir, 8448, 20, 1024)
@@ -4396,7 +4398,7 @@ func Hello() string {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 
 		// Should succeed
@@ -4405,6 +4407,124 @@ func Hello() string {
 		// Verify files were created
 		_, err = os.Stat(filepath.Join(dir, "xx_lens_client_gen.go"))
 		require.NoError(t, err)
+	})
+}
+
+func TestInjectASTClientPartialFailure(t *testing.T) {
+	t.Parallel()
+
+	errWriteFailed := errors.New("simulated injected file write failure")
+
+	writePkgSource := func(t *testing.T, dir string) {
+		t.Helper()
+		src := `package testpkg
+
+func Foo() int {
+	return 42
+}
+`
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.go"), []byte(src), 0o644))
+	}
+	clientFileFor := func(dir string) string {
+		return filepath.Join(dir, injectedFilenamePrefix+"client_gen.go")
+	}
+	apiFileFor := func(dir string) string {
+		return filepath.Join(dir, injectedFilenamePrefix+"api_gen.go")
+	}
+
+	t.Run("api_write_failure", func(t *testing.T) {
+		dir := t.TempDir()
+		writePkgSource(t, dir)
+
+		apiFile := apiFileFor(dir)
+		mod := newASTModifier()
+		mod.injectedFileWriter = func(path string, data []byte, perm fs.FileMode) error {
+			if path == apiFile {
+				return errWriteFailed
+			}
+			return os.WriteFile(path, data, perm)
+		}
+
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.ErrorIs(t, err, errWriteFailed)
+		assert.NoFileExists(t, clientFileFor(dir))
+		assert.NoFileExists(t, apiFile)
+		assert.Empty(t, mod.cleanupActions)
+	})
+
+	t.Run("client_write_failure", func(t *testing.T) {
+		dir := t.TempDir()
+		writePkgSource(t, dir)
+
+		mod := newASTModifier()
+		mod.injectedFileWriter = func(path string, data []byte, perm fs.FileMode) error {
+			// leave a partial file behind, like a failure mid-write
+			if err := os.WriteFile(path, data[:len(data)/2], perm); err != nil {
+				return err
+			}
+			return errWriteFailed
+		}
+
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.ErrorIs(t, err, errWriteFailed)
+		assert.NoFileExists(t, clientFileFor(dir))
+		assert.NoFileExists(t, apiFileFor(dir))
+		assert.Empty(t, mod.cleanupActions)
+	})
+
+	t.Run("remove_failure_joined", func(t *testing.T) {
+		dir := t.TempDir()
+		writePkgSource(t, dir)
+
+		mod := newASTModifier()
+		mod.injectedFileWriter = func(path string, _ []byte, _ fs.FileMode) error {
+			// occupy the client path with a non-empty directory so the
+			// best-effort removal fails and must join into the returned error
+			require.NoError(t, os.MkdirAll(path, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(path, "blocker.txt"), []byte("x"), 0o644))
+			return errWriteFailed
+		}
+
+		err := mod.InjectASTClient(dir, 8448, 20, 1024)
+		require.ErrorIs(t, err, errWriteFailed)
+		require.ErrorContains(t, err, injectedFilenamePrefix+"client_gen.go")
+		assert.Empty(t, mod.cleanupActions)
+	})
+
+	t.Run("retry_after_failure", func(t *testing.T) {
+		dir := t.TempDir()
+		writePkgSource(t, dir)
+
+		apiFile := apiFileFor(dir)
+		failedMod := newASTModifier()
+		failedMod.injectedFileWriter = func(path string, data []byte, perm fs.FileMode) error {
+			if path == apiFile {
+				return errWriteFailed
+			}
+			return os.WriteFile(path, data, perm)
+		}
+		require.Error(t, failedMod.InjectASTClient(dir, 8448, 20, 1024))
+
+		// leftovers would trip the injected filename glob check, so a clean
+		// failure must allow a fresh modifier to inject the same directory
+		retryMod := newASTModifier()
+		require.NoError(t, retryMod.InjectASTClient(dir, 8448, 20, 1024))
+		assert.FileExists(t, clientFileFor(dir))
+		assert.FileExists(t, apiFile)
+		assert.Len(t, retryMod.cleanupActions, 1)
+	})
+
+	t.Run("cleanup_removes_both_files", func(t *testing.T) {
+		dir := t.TempDir()
+		writePkgSource(t, dir)
+
+		mod := newASTModifier()
+		require.NoError(t, mod.InjectASTClient(dir, 8448, 20, 1024))
+		require.Len(t, mod.cleanupActions, 1)
+
+		require.NoError(t, mod.cleanupActions[0]())
+		assert.NoFileExists(t, clientFileFor(dir))
+		assert.NoFileExists(t, apiFileFor(dir))
 	})
 }
 
@@ -4422,7 +4542,7 @@ func Foo() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4451,7 +4571,7 @@ func (m *MyType) Method() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4492,7 +4612,7 @@ func Process() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4552,7 +4672,7 @@ func Process() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4605,7 +4725,7 @@ func Process() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4650,7 +4770,7 @@ func Process() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4692,7 +4812,7 @@ func Process() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4750,7 +4870,7 @@ func Func3() int {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4851,7 +4971,7 @@ func _setDateTimeToCurrent(context uintptr, p uintptr) (r int32) {
 `
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4898,7 +5018,7 @@ func NormalFunc() int {
 `
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "normal.go"), []byte(normalSrc), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -4952,7 +5072,7 @@ func GetContent() string {
 		filePath := filepath.Join(dir, "main.go")
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -5013,7 +5133,7 @@ func Caller() int {
 		filePath := filepath.Join(dir, "main.go")
 		require.NoError(t, os.WriteFile(filePath, []byte(src), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -5144,7 +5264,7 @@ func CreateAndProcess() int {
 		output, err := cmd.CombinedOutput()
 		require.NoError(t, err, "Original source should compile: %s", string(output))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err = mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -5231,7 +5351,7 @@ func CreateAndProcess() int {
 		filePath := filepath.Join(dir, "main.go")
 		require.NoError(t, os.WriteFile(filePath, []byte(mainSrc), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 
@@ -5313,7 +5433,7 @@ func CreateAndProcess() int {
 		filePath := filepath.Join(dir, "main.go")
 		require.NoError(t, os.WriteFile(filePath, []byte(mainSrc), 0644))
 
-		mod := &ASTModifier{}
+		mod := newASTModifier()
 		err := mod.InjectASTClient(dir, 8448, 20, 1024)
 		require.NoError(t, err)
 

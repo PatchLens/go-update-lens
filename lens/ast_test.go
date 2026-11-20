@@ -739,7 +739,7 @@ func main() { b := &Box[int]{v: 3}; _ = b.Set(4) }`,
 			const maxFieldLen = 256
 
 			// inject the client and test injection points
-			mod := &ASTModifier{}
+			mod := newASTModifier()
 			err = mod.InjectASTClient(tmp, port, maxRecurse, maxFieldLen)
 			require.NoError(t, err)
 			ident := tc.fnIdent
@@ -878,7 +878,7 @@ func main() {
 	const maxFieldLen = 256
 
 	// Inject AST client
-	mod := &ASTModifier{}
+	mod := newASTModifier()
 	err = mod.InjectASTClient(tmp, port, maxRecurse, maxFieldLen)
 	require.NoError(t, err)
 
