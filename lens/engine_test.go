@@ -359,6 +359,133 @@ func TestAnalysisEngine_Run(t *testing.T) {
 	})
 }
 
+func TestAnalysisEngine_setupTempEnvironment(t *testing.T) {
+	// Isolate MkdirTemp so created and removed temp roots can be observed.
+	tmpBase := t.TempDir()
+	t.Setenv("TMPDIR", tmpBase)
+
+	findTempRoots := func() []os.DirEntry {
+		t.Helper()
+		entries, err := os.ReadDir(tmpBase)
+		require.NoError(t, err)
+		return bulk.SliceFilter(func(e os.DirEntry) bool {
+			return strings.HasPrefix(e.Name(), "patchlens-")
+		}, entries)
+	}
+
+	newEngine := func(absProjDir, gopath, gomodcache string) *AnalysisEngine {
+		t.Helper()
+		return NewAnalysisEngine(&Config{
+			AbsProjDir: absProjDir,
+			Gopath:     gopath,
+			Gomodcache: gomodcache,
+		})
+	}
+
+	createDirs := func(dirs ...string) {
+		t.Helper()
+		for _, dir := range dirs {
+			require.NoError(t, os.MkdirAll(dir, 0755))
+		}
+	}
+
+	t.Run("success", func(t *testing.T) {
+		base := t.TempDir()
+		projDir := filepath.Join(base, "project")
+		gopath := filepath.Join(base, "gopath")
+		modCache := filepath.Join(base, "modcache")
+		createDirs(projDir, gopath, modCache)
+		require.NoError(t, os.WriteFile(filepath.Join(projDir, "main.go"), []byte("package main\n"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(gopath, "dep.txt"), []byte("dep"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(modCache, "mod.txt"), []byte("mod"), 0644))
+
+		engine := newEngine(projDir, gopath, modCache)
+		cleanup, err := engine.setupTempEnvironment()
+		require.NoError(t, err)
+		require.NotNil(t, cleanup)
+
+		tempRoots := findTempRoots()
+		require.Len(t, tempRoots, 1)
+		tempRoot := filepath.Join(tmpBase, tempRoots[0].Name())
+		assert.Equal(t, filepath.Join(tempRoot, "project"), engine.Config.AbsProjDir)
+		assert.Equal(t, filepath.Join(tempRoot, "gopath"), engine.Config.Gopath)
+		assert.Equal(t, filepath.Join(tempRoot, "gomodcache"), engine.Config.Gomodcache)
+		assert.FileExists(t, filepath.Join(engine.Config.AbsProjDir, "main.go"))
+		assert.FileExists(t, filepath.Join(engine.Config.Gopath, "dep.txt"))
+		assert.FileExists(t, filepath.Join(engine.Config.Gomodcache, "mod.txt"))
+
+		cleanup()
+		require.NoDirExists(t, tempRoot)
+	})
+
+	t.Run("gomodcache_within_gopath", func(t *testing.T) {
+		base := t.TempDir()
+		projDir := filepath.Join(base, "project")
+		gopath := filepath.Join(base, "gopath")
+		modCache := filepath.Join(gopath, "pkg", "mod")
+		createDirs(projDir, modCache)
+
+		engine := newEngine(projDir, gopath, modCache)
+		cleanup, err := engine.setupTempEnvironment()
+		require.NoError(t, err)
+		require.NotNil(t, cleanup)
+
+		tempRoot := filepath.Dir(engine.Config.AbsProjDir)
+		assert.Equal(t, filepath.Join(tempRoot, "gopath", "pkg", "mod"), engine.Config.Gomodcache)
+		assert.NoDirExists(t, filepath.Join(tempRoot, "gomodcache"))
+
+		cleanup()
+		require.NoDirExists(t, tempRoot)
+	})
+
+	// Missing source paths force CopyDir failures, which works even when tests run as root.
+	t.Run("project_copy_failure", func(t *testing.T) {
+		base := t.TempDir()
+
+		engine := newEngine(filepath.Join(base, "missing-project"), base, filepath.Join(base, "modcache"))
+		cleanup, err := engine.setupTempEnvironment()
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unable to copy project")
+		assert.Nil(t, cleanup) // no cleanup handed back that could double-remove
+		assert.Empty(t, findTempRoots())
+	})
+
+	t.Run("gopath_copy_failure", func(t *testing.T) {
+		base := t.TempDir()
+		projDir := filepath.Join(base, "project")
+		createDirs(projDir)
+
+		engine := newEngine(projDir, filepath.Join(base, "missing-gopath"), filepath.Join(base, "modcache"))
+		cleanup, err := engine.setupTempEnvironment()
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unable to copy GOPATH")
+		assert.Nil(t, cleanup)
+		assert.Empty(t, findTempRoots())
+		// Config must not reference the removed temp tree
+		assert.Equal(t, projDir, engine.Config.AbsProjDir)
+	})
+
+	t.Run("gomodcache_copy_failure", func(t *testing.T) {
+		base := t.TempDir()
+		projDir := filepath.Join(base, "project")
+		gopath := filepath.Join(base, "gopath")
+		createDirs(projDir, gopath)
+
+		engine := newEngine(projDir, gopath, filepath.Join(base, "missing-modcache"))
+		cleanup, err := engine.setupTempEnvironment()
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unable to copy GOMODCACHE")
+		assert.Nil(t, cleanup)
+		assert.Empty(t, findTempRoots())
+		// Config must not reference the removed temp tree
+		assert.Equal(t, projDir, engine.Config.AbsProjDir)
+		assert.Equal(t, gopath, engine.Config.Gopath)
+	})
+}
+
 func TestAnalysisEngine_parseInitialModules(t *testing.T) {
 	t.Run("module_flag_parsing", func(t *testing.T) {
 		t.Parallel()

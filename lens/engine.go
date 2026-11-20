@@ -990,11 +990,17 @@ func (e *AnalysisEngine) parseInitialModules() (*initialModulesResult, error) {
 	}, nil
 }
 
+// setupTempEnvironment creates a temporary root holding copies of the project and GOPATH, plus
+// the GOMODCACHE when it resides outside the GOPATH. Config is repointed at the new locations.
+//
+// Returns a cleanup function that removes the temporary root for the caller to invoke when done.
+// If any copy fails the partial tree is removed first and no cleanup is returned.
 func (e *AnalysisEngine) setupTempEnvironment() (func(), error) {
 	tempRoot, err := os.MkdirTemp("", "patchlens-*")
 	if err != nil {
 		return nil, fmt.Errorf("unable to create temp dir: %w", err)
 	}
+
 	cleanup := func() {
 		if err := WriteChmod(context.Background(), tempRoot); err != nil {
 			log.Printf("%sFailed to Chmod temp dir for cleanup: %v", ErrorLogPrefix, err)
@@ -1003,7 +1009,16 @@ func (e *AnalysisEngine) setupTempEnvironment() (func(), error) {
 			log.Printf("%sFailed to remove temp dir %s: %v", ErrorLogPrefix, tempRoot, err)
 		}
 	}
+	if err := e.populateTempEnvironment(tempRoot); err != nil {
+		cleanup()
+		return nil, err
+	}
+	return cleanup, nil
+}
 
+// populateTempEnvironment copies the project and GOPATH into tempRoot, plus GOMODCACHE when it
+// resides outside GOPATH. Config only points at the new locations after all copies succeed.
+func (e *AnalysisEngine) populateTempEnvironment(tempRoot string) error {
 	fmt.Printf("Copying files for analysis")
 	const logSize = 1024 * 1024 * 200
 	var logCopied atomic.Int64
@@ -1025,26 +1040,27 @@ func (e *AnalysisEngine) setupTempEnvironment() (func(), error) {
 	ctx := context.Background()
 	newProj := filepath.Join(tempRoot, "project")
 	if err := CopyDir(ctx, e.Config.AbsProjDir, newProj, copyProgressHandler); err != nil {
-		return nil, fmt.Errorf("unable to copy project: %w", err)
+		return fmt.Errorf("unable to copy project: %w", err)
 	}
-	e.Config.AbsProjDir = newProj
 
 	newGOPATH := filepath.Join(tempRoot, "gopath")
 	if err := CopyDir(ctx, e.Config.Gopath, newGOPATH, copyProgressHandler); err != nil {
-		return nil, fmt.Errorf("unable to copy GOPATH: %w", err)
+		return fmt.Errorf("unable to copy GOPATH: %w", err)
 	}
+
+	newModCache := filepath.Join(newGOPATH, "pkg", "mod")
 	if within, err := fileWithinDir(e.Config.Gomodcache, e.Config.Gopath); err != nil || !within {
-		newModCache := filepath.Join(tempRoot, "gomodcache")
+		newModCache = filepath.Join(tempRoot, "gomodcache")
 		if err := CopyDir(ctx, e.Config.Gomodcache, newModCache, copyProgressHandler); err != nil {
-			return nil, fmt.Errorf("unable to copy GOMODCACHE: %w", err)
+			return fmt.Errorf("unable to copy GOMODCACHE: %w", err)
 		}
-		e.Config.Gomodcache = newModCache
-	} else {
-		e.Config.Gomodcache = filepath.Join(newGOPATH, "pkg", "mod")
 	}
-	e.Config.Gopath = newGOPATH
+
 	fmt.Println()
-	return cleanup, nil
+	e.Config.AbsProjDir = newProj
+	e.Config.Gopath = newGOPATH
+	e.Config.Gomodcache = newModCache
+	return nil
 }
 
 // Prepare performs comprehensive validation and preparation of the configuration
