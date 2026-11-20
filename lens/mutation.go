@@ -47,11 +47,6 @@ var disabledMutations = []string{
 // RunMutationTesting runs mutation testing targeted to the module changes.
 func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, lineScopedMutations, runTargetedTests bool,
 	moduleChanges []*ModuleFunction, testFunctions []*TestFunction) (MutationResult, error) {
-	// Regex to parse the summary line:
-	//   The mutation score is 0.750000 (6 passed, 2 failed, 0 duplicated, 0 skipped, total is 8)
-	summaryRe := regexp.MustCompile(
-		`The mutation score is .* \((\d+) passed, (\d+) failed, (\d+) duplicated, (\d+) skipped, total is (\d+)\)`)
-
 	// TODO - FUTURE - should we do mutation testing against the new version? Would be more useful for full mutation strategy
 
 	// Collect the set of files containing the changed functions this test covers
@@ -171,30 +166,44 @@ func RunMutationTesting(gopath, gomodcache, projectDir string, fastMutations, li
 		return MutationResult{}, fmt.Errorf("error running mutation tests: %w", err)
 	}
 
-	// Parse the summary line for passed (killed) and total mutants
-	out := string(outBytes)
-	m := summaryRe.FindStringSubmatch(out)
-	if m == nil {
-		return MutationResult{}, fmt.Errorf("could not parse mutation summary:\n%s", out)
+	// Parse the summary line for killed and total mutants
+	result, logMsg, err := parseMutationSummary(string(outBytes))
+	if err != nil {
+		return MutationResult{}, err
 	}
-
-	logMsg := strings.ReplaceAll(m[0], "The mutation score is", "Mutation score:")
-	suffixIndex := strings.Index(logMsg, "failed")
-	if suffixIndex > 0 {
-		logMsg = logMsg[:suffixIndex] + "detected)"
-	}
-	logMsg = strings.ReplaceAll(logMsg, "passed", "alive")
 	log.Println(logMsg)
-	killed, _ := strconv.Atoi(m[2])
-	total, _ := strconv.Atoi(m[5])
 
 	// remove unnecessary report.json report (for now)
 	go func() { _ = os.Remove(filepath.Join(projectDir, "report.json")) }()
 
+	return result, nil
+}
+
+// mutationSummaryRe matches the go-mutesting summary line:
+//
+//	The mutation score is 0.750000 (6 passed, 2 failed, 0 duplicated, 0 skipped, total is 8)
+//
+// The tool counts mutants killed by tests as "passed" and escaped mutants as "failed".
+var mutationSummaryRe = regexp.MustCompile(
+	`The mutation score is .* \((\d+) passed, (\d+) failed, (\d+) duplicated, (\d+) skipped, total is (\d+)\)`)
+
+// parseMutationSummary parses the go-mutesting summary line from its output,
+// returning the mutation result and a summary line relabeled for logging.
+func parseMutationSummary(out string) (MutationResult, string, error) {
+	m := mutationSummaryRe.FindStringSubmatch(out)
+	if m == nil {
+		return MutationResult{}, "", fmt.Errorf("could not parse mutation summary:\n%s", out)
+	}
+	killed, _ := strconv.Atoi(m[1])
+	total, _ := strconv.Atoi(m[5])
+	// Relabel to PatchLens terms: passed -> detected (killed), failed -> alive (escaped)
+	logMsg := strings.ReplaceAll(m[0], "The mutation score is", "Mutation score:")
+	logMsg = strings.ReplaceAll(logMsg, "passed", "detected")
+	logMsg = strings.ReplaceAll(logMsg, "failed", "alive")
 	return MutationResult{
 		MutationCount: total,
 		SquashedCount: killed,
-	}, nil
+	}, logMsg, nil
 }
 
 const scriptFinishCheck = `if [ "$MUTATE_DEBUG" = true ] || [ "$MUTATE_VERBOSE" = true ] ; then

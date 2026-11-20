@@ -655,6 +655,6 @@ func (fv FieldValues) ID() string {
 type MutationResult struct {
 	// MutationCount is the total mutations executed.
 	MutationCount int
-	// SquashedCount is the number of deduplicated mutations.
+	// SquashedCount is the number of mutations killed by tests.
 	SquashedCount int
 }
