@@ -677,41 +677,7 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 		bottom.Text(text, (bottom.Width()-textBox.Width())/2, bottom.Height()/2, 0, titleFont)
 		resultBox.Bottom += textBox.Height() * 2
 	} else {
-		slices.SortFunc(riskyTests, func(a, b []string) int {
-			aGen := strings.HasPrefix(a[0], GeneratedTestFunctionPrefix)
-			bGen := strings.HasPrefix(b[0], GeneratedTestFunctionPrefix)
-			if aGen != bGen { // sort generated functions last
-				if aGen {
-					return 1
-				} else {
-					return -1
-				}
-			}
-			var aRegress, bRegress int
-			if a[1] == testFailStr {
-				aRegress = 1
-			}
-			if b[1] == testFailStr {
-				bRegress = 1
-			}
-			if aRegress != bRegress {
-				return bRegress - aRegress
-			}
-
-			aCount, _ := strconv.Atoi(a[2])
-			bCount, _ := strconv.Atoi(b[2])
-			if aCount != bCount { // sort by field change count first, highest first
-				return bCount - aCount
-			}
-
-			aCount, _ = strconv.Atoi(a[3])
-			bCount, _ = strconv.Atoi(b[3])
-			if aCount != bCount { // highest mutations second
-				return bCount - aCount
-			}
-
-			return 0
-		})
+		slices.SortFunc(riskyTests, compareRiskyTests)
 		if len(riskyTests) > bottomTableMaxRecords {
 			riskyTests = riskyTests[:bottomTableMaxRecords]
 		}
@@ -795,6 +761,38 @@ func renderChartsToPainter(p *charts.Painter, moduleName, startVersion, changeVe
 		p.Text(title, (p.Width()/2)-(titleBox.Width()/2), titleBox.Height(), 0, titleFont)
 	}
 	return resultBox, nil
+}
+
+// compareRiskyTests orders risky test table rows [name, regression, fieldChangeCount,
+// fieldChanges]: generated functions last, regressions first, then field change count
+// descending. Ties compare equal, per-test mutation counts are not available here.
+func compareRiskyTests(a, b []string) int {
+	aGen := strings.HasPrefix(a[0], GeneratedTestFunctionPrefix)
+	bGen := strings.HasPrefix(b[0], GeneratedTestFunctionPrefix)
+	if aGen != bGen {
+		if aGen {
+			return 1
+		}
+		return -1
+	}
+	var aRegress, bRegress int
+	if a[1] == testFailStr {
+		aRegress = 1
+	}
+	if b[1] == testFailStr {
+		bRegress = 1
+	}
+	if aRegress != bRegress {
+		return bRegress - aRegress
+	}
+
+	aCount, _ := strconv.Atoi(a[2])
+	bCount, _ := strconv.Atoi(b[2])
+	if aCount != bCount {
+		return bCount - aCount
+	}
+
+	return 0
 }
 
 func firstValueSeriesRankColor(theme charts.ColorPalette, sl charts.BarSeriesList) charts.Color {
