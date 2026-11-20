@@ -98,7 +98,7 @@ func CopyFile(src, dst string) (err error) {
 func CopyDir(ctx context.Context, src, dst string, progressNotify func(string, os.FileInfo)) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.SetLimit(runtime.NumCPU() * 4)
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -128,10 +128,9 @@ func CopyDir(ctx context.Context, src, dst string, progressNotify func(string, o
 			return nil
 		}
 	})
-	if err != nil {
-		return err
-	}
-	return eg.Wait()
+	// wait even on walk errors so in-flight copies finish and their errors surface
+	waitErr := eg.Wait()
+	return errors.Join(walkErr, waitErr)
 }
 
 // WriteChmod adds write permissions for owner/group/others on every file and directory under root.

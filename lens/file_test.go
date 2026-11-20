@@ -4,11 +4,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
-	"github.com/go-analyze/bulk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -114,50 +114,110 @@ func TestCopyFile(t *testing.T) {
 
 func TestCopyDir(t *testing.T) {
 	t.Parallel()
-	srcDir := t.TempDir()
 
-	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "dir1", "dir2"), 0755))
-	files := map[string]string{
-		filepath.Join(srcDir, "file1.txt"):                 "file1-test_content",
-		filepath.Join(srcDir, "file2.txt"):                 "file2-test_content",
-		filepath.Join(srcDir, "dir1", "file1.txt"):         "dir1/file1-test_content",
-		filepath.Join(srcDir, "dir1", "file2.txt"):         "dir1/file2-test_content",
-		filepath.Join(srcDir, "dir1", "dir2", "file1.txt"): "dir1/dir2/file1-test_content",
-		filepath.Join(srcDir, "dir1", "dir2", "file2.txt"): "dir1/dir2/file2-test_content",
-	}
-	for path, content := range files {
-		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
-	}
+	t.Run("success", func(t *testing.T) {
+		srcDir := t.TempDir()
+		dstDir := t.TempDir()
 
-	dstDir := t.TempDir()
-	require.NoError(t, CopyDir(t.Context(), srcDir, dstDir, nil))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "dir1", "dir2"), 0755))
+		files := map[string]string{
+			"file1.txt":           "file1-test_content",
+			"file2.txt":           "file2-test_content",
+			"dir1/file1.txt":      "dir1/file1-test_content",
+			"dir1/file2.txt":      "dir1/file2-test_content",
+			"dir1/dir2/file1.txt": "dir1/dir2/file1-test_content",
+			"dir1/dir2/file2.txt": "dir1/dir2/file2-test_content",
+		}
+		for name, content := range files {
+			require.NoError(t, os.WriteFile(filepath.Join(srcDir, name), []byte(content), 0644))
+		}
 
-	// Helper function to collect file contents
-	collectFiles := func(root string) (map[string]string, error) {
-		filesMap := make(map[string]string)
-		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
+		require.NoError(t, CopyDir(t.Context(), srcDir, dstDir, nil))
+
+		// every file lands at its relative path with matching content
+		for name, want := range files {
+			got, err := os.ReadFile(filepath.Join(dstDir, name))
+			require.NoError(t, err)
+			assert.Equal(t, want, string(got))
+		}
+	})
+
+	t.Run("copy_error_surfaces", func(t *testing.T) {
+		srcDir := t.TempDir()
+		dstDir := t.TempDir()
+
+		files := map[string]string{
+			"a.txt": "a-test_content",
+			"b.txt": "b-test_content",
+			"c.txt": "c-test_content",
+		}
+		for name, content := range files {
+			require.NoError(t, os.WriteFile(filepath.Join(srcDir, name), []byte(content), 0644))
+		}
+		// directory shadows a.txt so its copy fails on create
+		require.NoError(t, os.MkdirAll(filepath.Join(dstDir, "a.txt"), 0755))
+
+		err := CopyDir(t.Context(), srcDir, dstDir, nil)
+		require.Error(t, err)
+		// root cause must surface, not just the context cancel triggered by it
+		assert.Contains(t, err.Error(), "a.txt")
+
+		for name, content := range files {
+			if name == "a.txt" {
+				continue
 			}
-			if !info.IsDir() {
-				content, err := os.ReadFile(path)
-				if err != nil {
-					return err
-				}
-				filesMap[path] = string(content)
+			got, readErr := os.ReadFile(filepath.Join(dstDir, name))
+			if os.IsNotExist(readErr) { // walk may abort before launching every copy
+				continue
 			}
-			return nil
-		})
-		return filesMap, err
-	}
+			require.NoError(t, readErr)
+			assert.Equal(t, content, string(got))
+		}
 
-	dstFiles, err := collectFiles(dstDir)
-	require.NoError(t, err)
-	require.Len(t, dstFiles, len(files))
-	dstContents := bulk.MapValuesSlice(dstFiles)
-	for _, v := range files {
-		assert.True(t, slices.Contains(dstContents, v))
-	}
+		info, err := os.Stat(filepath.Join(dstDir, "a.txt"))
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	})
+
+	t.Run("walk_error_mid_copy", func(t *testing.T) {
+		srcDir := t.TempDir()
+		dstDir := t.TempDir()
+
+		// large enough that the b.txt copy is still running when the walk fails
+		bigContent := strings.Repeat("abcdefgh", 1<<20)
+		require.NoError(t, os.WriteFile(filepath.Join(srcDir, "b.txt"), []byte(bigContent), 0644))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "m"), 0755))
+		xPath := filepath.Join(srcDir, "x.txt")
+		require.NoError(t, os.WriteFile(xPath, []byte("x-test_content"), 0644))
+
+		var completed atomic.Int64
+		// remove x.txt when the walk reaches dir m so lstat fails after b.txt's copy launched
+		removeX := func(target string, info os.FileInfo) {
+			if target == filepath.Join(dstDir, "m") {
+				require.NoError(t, os.Remove(xPath))
+			} else if !info.IsDir() { // count settled file copies
+				completed.Add(1)
+			}
+		}
+
+		err := CopyDir(t.Context(), srcDir, dstDir, removeX)
+		require.Error(t, err)
+		require.ErrorIs(t, err, fs.ErrNotExist)
+
+		// in-flight copy must settle before return
+		assert.Equal(t, int64(1), completed.Load())
+
+		entries, err := os.ReadDir(dstDir) // only entries walked before the failure appear
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		assert.Equal(t, "b.txt", entries[0].Name())
+		assert.Equal(t, "m", entries[1].Name())
+
+		// in-flight copy of b.txt must be fully written when CopyDir returns
+		got, err := os.ReadFile(filepath.Join(dstDir, "b.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, []byte(bigContent), got)
+	})
 }
 
 func TestReplaceFile(t *testing.T) {
