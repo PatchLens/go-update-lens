@@ -67,11 +67,12 @@ func TestAstExecServerStart(t *testing.T) {
 	})
 
 	t.Run("serves_and_stops", func(t *testing.T) {
-		port := freePort(t)
+		// bind port 0 so the OS assigns a port, avoiding free-port reuse races
 		handler := &mockPointHandler{}
-		srv, err := astExecServerStart("127.0.0.1", port, handler, 1024)
+		srv, err := astExecServerStart("127.0.0.1", 0, handler, 1024)
 		require.NoError(t, err)
-		assert.Equal(t, port, srv.Port())
+		port := srv.Port()
+		assert.NotZero(t, port)
 
 		var buf bytes.Buffer
 		lensEncodeMessagePoint(&buf, 1, 12345, []lensMonitorStackFrame{})

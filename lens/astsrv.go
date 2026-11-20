@@ -10,8 +10,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -64,20 +62,20 @@ type LensMonitorField struct {
 // astServer wraps the HTTP server for receiving client messages.
 type astServer struct {
 	server       *http.Server
+	port         int // actual bound port, differs from the requested port when binding port 0
 	err          atomic.Pointer[error]
 	pointHandler atomic.Value
 	maxFieldLen  int // maximum length for strings and slices during decode
 }
 
 func (s *astServer) Port() int {
-	_, portStr, _ := strings.Cut(s.server.Addr, ":")
-	port, _ := strconv.Atoi(portStr)
-	return port
+	return s.port
 }
 
 // astExecServerStart constructs a astServer listening on host:port. Message handler functions are provided so that
 // AST events can be evaluated as they occur rather than needing to retain everything for later analysis.
 // The maxFieldLen parameter limits the maximum length of strings and slices during message decoding.
+// Passing port 0 binds an ephemeral port and Port reports the actual bound port.
 // Returns an error if the address cannot be bound.
 func astExecServerStart(host string, port int, pointHandler astPointHandler, maxFieldLen int) (*astServer, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
@@ -93,6 +91,11 @@ func astExecServerStart(host string, port int, pointHandler astPointHandler, max
 	listener, err := net.Listen("tcp", addr) // bind synchronously so bind failures return deterministically
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+		s.port = tcpAddr.Port
+	} else {
+		s.port = port
 	}
 
 	go func() {
