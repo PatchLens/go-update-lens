@@ -2,13 +2,17 @@ package lens
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockPointHandler struct {
@@ -45,6 +49,43 @@ var invalidMethods = []string{
 	http.MethodGet, http.MethodHead, http.MethodPut,
 	http.MethodPatch, http.MethodDelete, http.MethodConnect,
 	http.MethodOptions, http.MethodTrace,
+}
+
+func TestAstExecServerStart(t *testing.T) {
+	t.Parallel()
+
+	t.Run("port_conflict", func(t *testing.T) {
+		// hold a bound listener so the second bind on the same port fails
+		holder, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = holder.Close() })
+		port := holder.Addr().(*net.TCPAddr).Port
+
+		srv, err := astExecServerStart("127.0.0.1", port, nil, 1024)
+		require.Error(t, err)
+		assert.Nil(t, srv)
+	})
+
+	t.Run("serves_and_stops", func(t *testing.T) {
+		port := freePort(t)
+		handler := &mockPointHandler{}
+		srv, err := astExecServerStart("127.0.0.1", port, handler, 1024)
+		require.NoError(t, err)
+		assert.Equal(t, port, srv.Port())
+
+		var buf bytes.Buffer
+		lensEncodeMessagePoint(&buf, 1, 12345, []lensMonitorStackFrame{})
+		url := fmt.Sprintf("http://127.0.0.1:%d%s", port, lensMonitorEndpointPathPoint)
+		// handlers run before the response is written, so the round trip guarantees delivery
+		resp, err := http.Post(url, "application/octet-stream", &buf)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&handler.pointCalls))
+
+		err = srv.Stop(context.Background())
+		assert.NoError(t, err) // ErrServerClosed from Serve must not surface
+	})
 }
 
 func TestASTServerHandlePoint(t *testing.T) {

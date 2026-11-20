@@ -8,10 +8,10 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -78,6 +78,7 @@ func (s *astServer) Port() int {
 // astExecServerStart constructs a astServer listening on host:port. Message handler functions are provided so that
 // AST events can be evaluated as they occur rather than needing to retain everything for later analysis.
 // The maxFieldLen parameter limits the maximum length of strings and slices during message decoding.
+// Returns an error if the address cannot be bound.
 func astExecServerStart(host string, port int, pointHandler astPointHandler, maxFieldLen int) (*astServer, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	mux := http.NewServeMux()
@@ -88,19 +89,20 @@ func astExecServerStart(host string, port int, pointHandler astPointHandler, max
 	mux.HandleFunc(lensMonitorEndpointPathState, s.handlePointState)
 	mux.HandleFunc(lensMonitorEndpointPathPanic, s.handlePointPanic)
 	s.server = &http.Server{Addr: addr, Handler: mux}
-	var wg sync.WaitGroup
-	wg.Add(1)
+
+	listener, err := net.Listen("tcp", addr) // bind synchronously so bind failures return deterministically
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+
 	go func() {
-		wg.Done() // signal that routine has started
-		if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.err.Store(&err)
 			log.Printf("%sAST Monitor Server error: %v", ErrorLogPrefix, err)
 		}
 	}()
-	wg.Wait()
-	time.Sleep(100 * time.Millisecond) // short wait to ensure error is communicated
 
-	return s, s.errCheck()
+	return s, nil
 }
 
 func (s *astServer) errCheck() error {
